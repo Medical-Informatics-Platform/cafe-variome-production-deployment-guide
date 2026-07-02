@@ -47,8 +47,10 @@ services:
       retries: 5
       start_period: 20s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
   # Force each backend's outbound HTTP(S) through the egress proxy. Compose merges
   # these environment maps with the base service definitions (additive).

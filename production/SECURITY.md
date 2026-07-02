@@ -41,7 +41,7 @@ The boundary that contains a compromised container. Three app networks are `inte
 
 - **Vault in non-dev mode**: file storage, persistent, real seal/unseal - **no hardcoded root token**. Initialised once by `scripts/bootstrap_local_infra.sh`, which writes the unseal keys + root token to `secrets/vault-init.json` (gitignored, `0600`). **Move that file offline and delete it from the host.** Vault boots **sealed** after any restart; re-unseal with `scripts/unseal_vault.sh`. There is no cloud auto-unseal here.
 - Backends authenticate to Vault with an **AppRole** (`VAULT_ROLE_ID`/`VAULT_SECRET_ID`), scoped by a policy to the CV3 KV path + transit keys only.
-- **Keycloak** runs in prod mode on its own Postgres, behind the TLS proxy at `/auth`. The db-manager's first-run installer creates the realm client + initial admin; that client's service account holds only the `realm-management` roles it needs (`manage/view/query users`).
+- **Keycloak** runs in prod mode on its own Postgres, behind the TLS proxy at `/auth`. The db-manager's first-run installer creates the realm client + initial admin; that client's service account holds only the `realm-management` roles it needs (`manage/view/query users`). Additional best practices applied to the local realm (bootstrap + Caddyfile): the **admin console/API and master realm are blocked at the public edge** (403; admin access is via `kcadm.sh` in the container or an on-demand loopback tunnel - see `Caddyfile.reverse-proxy`), **brute-force detection** is on, **login + admin events** are recorded (1-year expiration, and successful logins are also surfaced into the container log -> journal), and a **password policy** (`length(12) and notUsername`) is set. Remaining operator duties: rotate `KC_BOOTSTRAP_ADMIN_*` after go-live (create named per-person admins, then delete the shared bootstrap admin) and keep the Keycloak image current via Renovate.
 - **MongoDB auth is enabled.** The CV3 image ignores the config's `User`/`Password` and builds an unauthenticated URI, so the app credentials are embedded in the connection `Host` (`user:pass@cv3-mongo`) to keep auth on; the `cv3app` user is scoped to the `cafevariome` DB. Use URL-safe (hex) passwords. The defence-in-depth here is auth **plus** the internal-only network - Mongo is never reachable off `cv_egress`.
 - `scripts/validate-env.sh` is a fail-closed gate: it refuses to deploy while any required secret is empty or still a `CHANGE_ME` placeholder.
 - Gitignored, never committed: `.env`, rendered `config/*.json` (carry the Mongo password), `secrets/`, `backups/`.
@@ -51,7 +51,17 @@ The boundary that contains a compromised container. Three app networks are `inte
 - Every image is pinned by immutable digest (`repo:tag@sha256:…`) - the third-party CV3 images and all infra images (Vault, Keycloak, Postgres, Mongo, Redis, Caddy, Squid).
 - **Renovate** (`renovate.json`) tracks those pins and opens grouped PRs for digest/version bumps: minors auto-proposed, **majors gated** behind the dependency dashboard, no automerge, with merge-confidence + changelog context.
 
-## 6. Residual risks / hardening backlog
+## 6. Logging & audit retention (compliance)
+
+Access/audit logs are a hard requirement here: they must survive stack redeploys and host reboots and be retained for **one year**.
+
+- **Every container logs to the host systemd journal** (compose `journald` driver, tagged with the container name). Per-container `json-file` logs would be deleted on every container recreation - that is why they are not used. `cv.sh logs` / `docker logs` keep working (journald read-back).
+- **The journal is made genuinely persistent** by `scripts/apply-host-tuning.sh`: the CIS hardening sets `Storage=persistent` but never creates `/var/log/journal`, so out of the box the journal is volatile and lost on reboot. The script creates the directory, installs `deploy/journald-cv3.conf` (`MaxRetentionSec=1year`, `SystemMaxUse=10G`, `SystemKeepFree=5G`, raised rate limits so bursty access logs aren't dropped) and flushes the volatile store.
+- **HTTP access log**: Caddy (`cv-proxy`) writes one structured JSON line per request (timestamp, client IP, method, URI, status, user agent) to stdout -> journal. Query: `sudo journalctl CONTAINER_NAME=cv-proxy --since "..."`.
+- **Identity audit**: Keycloak login/admin events are stored in its DB for a year (realm `eventsExpiration`) *and* successful/failed logins appear in its container log -> journal.
+- **Caveats**: size caps evict oldest-first even inside the retention window - keep `SystemMaxUse` generous and watch `journalctl --disk-usage`; for court-grade immutability, ship the journal to an external WORM store (out of scope here).
+
+## 7. Residual risks / hardening backlog
 
 - **Keycloak rootfs is writable** (`start --optimized=false` augments at boot). Build a pre-optimised image and switch it to `read_only` to close this.
 - **Caddy/`tls internal` on a no-DNS test box** is self-signed; production uses a real domain + Let's Encrypt over the egress squid (the ACME path is otherwise identical).

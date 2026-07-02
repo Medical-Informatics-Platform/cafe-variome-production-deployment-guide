@@ -56,8 +56,10 @@ services:
       cv_edge: {}          # reach frontend + the 3 public backends (+ keycloak, local-infra)
       cv_proxy_egress: {}  # ACME egress via cv-tls-egress-proxy (its HTTP(S)_PROXY target)
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
   # Dedicated, Let's-Encrypt-only egress proxy for cv-proxy (Caddy). The only thing
   # on `wan` from this overlay; allowlist permits only the ACME endpoints.
@@ -95,8 +97,10 @@ services:
       retries: 5
       start_period: 20s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
 networks:
   # Public ingress bridge for cv-proxy ONLY (so rootless pasta can forward 80/443 to it).

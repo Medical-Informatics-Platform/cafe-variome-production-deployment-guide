@@ -18,11 +18,18 @@
 #     the secrets it needs.
 #   - config files mounted read-only.
 
-x-json-logging: &json_logging
-  driver: json-file
+# Container logs go to the HOST's systemd journal (not per-container json files):
+# json-file logs are DELETED whenever a container is recreated (config change,
+# image update, `cv.sh down`), which fails the retention requirement — access and
+# audit logs must survive stack redeploys and host reboots and be kept for a year.
+# The journal is persistent + time/size-managed on the host (deploy/journald-cv3.conf,
+# installed by scripts/apply-host-tuning.sh). `cv.sh logs` / `docker logs` still work
+# (journald supports read-back). Query across restarts with e.g.:
+#   sudo journalctl CONTAINER_NAME=cv3-backend-admin --since "2026-01-01"
+x-journald-logging: &cv_logging
+  driver: journald
   options:
-    max-size: "${CV_LOG_MAX_SIZE:-10m}"
-    max-file: "${CV_LOG_MAX_FILE:-3}"
+    tag: "{{.Name}}"
 
 # Backend env common to every CV3 backend (Vault AppRole for runtime secrets).
 # CV3_BIND: the image defaults its HTTP listener to 127.0.0.1:5000 (loopback only),
@@ -40,7 +47,7 @@ x-backend-volumes: &backend_volumes
   - ./config/backend_config.json:/home/appuser/.config/CV3Backend/instance_config.json:ro
   # /app/logs (hypercorn access log) is an appuser-owned tmpfs in compose.hardening.yml
   # - a named volume there is root-owned under userns remap and not appuser-writable.
-  # The durable record is the container's stdout/stderr (json-file logging driver).
+  # The durable record is the container's stdout/stderr (journald logging driver).
 
 networks:
   # Public-facing HTTP entrypoints the reverse proxy reaches (added in
@@ -73,7 +80,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    logging: *json_logging
+    logging: *cv_logging
 
   cv3-backend-query:
     image: brookeslab/cv3-backend-query:latest@sha256:25fa6a24d9662abf3640707863fcd22679dfe265e10396d6e675c0c1e173d75b
@@ -89,7 +96,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    logging: *json_logging
+    logging: *cv_logging
 
   cv3-backend-network:
     image: brookeslab/cv3-backend-network:latest@sha256:c929344e84ebcf77bbc847792bc0a1638a8b00477803736f2d3973225178d875
@@ -105,7 +112,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    logging: *json_logging
+    logging: *cv_logging
 
   cv3-backend-query-meta:
     image: brookeslab/cv3-backend-query-meta:latest@sha256:e07fb241be045255e6878f7e1c75ece9f25e6022ff3542d39314d9967667d952
@@ -118,7 +125,7 @@ services:
     volumes: *backend_volumes
     networks: [cv_backend, cv_egress]   # internal only (not proxied publicly)
     healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
-    logging: *json_logging
+    logging: *cv_logging
 
   cv3-backend-database-manager:
     image: brookeslab/cv3-backend-database-manager:latest@sha256:77c234b9fb6c3544bddd45caf7036a7963536d884a9e737079efed21f2d1141d
@@ -134,7 +141,7 @@ services:
     volumes: *backend_volumes
     networks: [cv_backend, cv_egress]
     healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
-    logging: *json_logging
+    logging: *cv_logging
 
   cv3-backend-scheduler:
     image: brookeslab/cv3-backend-scheduler:latest@sha256:9b0f07bef13d4b877e8f62ab0b4af7a5b4d3d39b1803c8d781d484a835f611f0
@@ -145,7 +152,7 @@ services:
     volumes: *backend_volumes
     networks: [cv_backend, cv_egress]
     healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
-    logging: *json_logging
+    logging: *cv_logging
 
   cv3-frontend:
     image: brookeslab/cv3-frontend:latest@sha256:563b979a616547477a6794f6e3e89d4cb0dfccc598d278ec515697510ab71dfb
@@ -162,4 +169,4 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
-    logging: *json_logging
+    logging: *cv_logging

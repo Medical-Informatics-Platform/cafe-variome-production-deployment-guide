@@ -117,6 +117,22 @@ for role in manage-users view-users query-users; do
     || echo "  WARN: could not grant realm-management:$role to service-account-${CLIENT}"
 done
 
+echo "== Keycloak: realm hardening (brute force, audit events, password policy) =="
+# Best-practice realm settings for a public deployment (idempotent):
+#  - brute-force detection: temporary account lockout on repeated failed logins
+#    (permanentLockout stays false - no self-inflicted DoS on shared accounts).
+#  - login + admin EVENT auditing, retained ~1 year in Keycloak's DB (eventsExpiration
+#    is seconds) - complements the host journal, which captures the containers' logs.
+#  - a minimum password policy; applies on next password (re)set, so the dbm-created
+#    temporary admin password still works and must be upgraded at first login.
+kc update "realms/$REALM" \
+  -s bruteForceProtected=true -s failureFactor=10 \
+  -s 'passwordPolicy=length(12) and notUsername' >/dev/null
+kc update "events/config" -r "$REALM" \
+  -s eventsEnabled=true -s eventsExpiration=31536000 \
+  -s adminEventsEnabled=true -s adminEventsDetailsEnabled=true >/dev/null
+echo "   brute-force on, events on (1y), passwordPolicy=length(12)+notUsername"
+
 echo "== Mongo: app user with dbOwner (the db-manager's init_db drops + recreates the DB) =="
 mongo_root() { docker exec cv3-mongo mongosh --quiet -u "$MONGO_USER" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin cafevariome --eval "$1"; }
 mongo_root "db.getSiblingDB('cafevariome').runCommand({createUser:'$MONGO_APP_USERNAME',pwd:'$MONGO_APP_PASSWORD',roles:[{role:'dbOwner',db:'cafevariome'}]})" 2>/dev/null \

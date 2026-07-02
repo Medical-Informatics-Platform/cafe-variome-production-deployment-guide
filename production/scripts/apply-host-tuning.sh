@@ -34,6 +34,17 @@ install -m 0644 "$DEPLOY/dockeruser-limits.conf"   /etc/security/limits.d/99-doc
 install -D -m 0644 "$DEPLOY/nofile.conf"           /etc/systemd/system/user@.service.d/nofile.conf
 install -m 0644 "$DEPLOY/unprivileged-ports.conf"  /etc/sysctl.d/99-cafevariome-unprivileged-ports.conf
 sysctl --system >/dev/null
+
+echo "== persistent journal + 1-year retention (container/access logs live here) =="
+# The hardening sets Storage=persistent but never creates /var/log/journal, so the
+# journal is actually volatile (lost on reboot) until the directory exists. The CV3
+# compose logs every container via the journald driver - see deploy/journald-cv3.conf.
+install -D -m 0644 "$DEPLOY/journald-cv3.conf" /etc/systemd/journald.conf.d/cv3-retention.conf
+install -d -m 2755 -g systemd-journal /var/log/journal
+systemctl restart systemd-journald
+# flush any volatile entries accumulated before this run into the persistent store
+journalctl --flush 2>/dev/null || true
+echo "   journal storage: $(test -d /var/log/journal && echo persistent || echo VOLATILE), usage: $(journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*[GM]' | head -1)"
 systemctl daemon-reload
 echo "   net.ipv4.ip_unprivileged_port_start = $(sysctl -n net.ipv4.ip_unprivileged_port_start)"
 

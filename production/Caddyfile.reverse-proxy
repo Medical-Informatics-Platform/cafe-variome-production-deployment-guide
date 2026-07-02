@@ -24,6 +24,16 @@
 	tls {$CV_TLS:admin@example.com}
 	encode zstd gzip
 
+	# ACCESS LOG: one structured JSON line
+	# per request (timestamp, client IP, method, URI, status, user agent) to stdout
+	# -> the journald logging driver -> the host's persistent journal (1-year
+	# retention, survives redeploys/reboots; see deploy/journald-cv3.conf). Query:
+	#   sudo journalctl CONTAINER_NAME=cv-proxy --since "2026-01-01" | grep '"uri"'
+	log {
+		output stdout
+		format json
+	}
+
 	# Backend APIs. handle_path strips the public prefix so the backend sees the
 	# request at root, matching the upstream Apache `ProxyPass /api http://:5000`.
 	handle_path /api/* {
@@ -41,6 +51,20 @@
 	# EXTERNAL Keycloak, delete this block and set backend_config.json Keycloak.URL +
 	# the frontend redirect URLs to the external host.
 	handle /auth/* {
+		# Keycloak hardening: the ADMIN console/API (/auth/admin) and the master
+		# realm are not for end users - never expose them on the public edge. The
+		# app only needs the cafe_variome realm's OIDC endpoints; the db-manager
+		# talks to Keycloak in-cluster (BackendURL), unaffected by this block.
+		# Admin access without public exposure (rootless: the host cannot reach
+		# container IPs, so plain ssh -L to the container won't work):
+		#   - CLI: docker exec cv3-keycloak /opt/keycloak/bin/kcadm.sh ... (see bootstrap)
+		#   - GUI, on demand: publish loopback-only, then tunnel to it -
+		#       docker run --rm -d --name kc-tunnel --network production_cv_edge \
+		#         -p 127.0.0.1:8081:8080 alpine/socat tcp-listen:8080,fork,reuseaddr tcp:cv3-keycloak:8080
+		#       ssh -L 8081:127.0.0.1:8081 <admin>@<host>  ->  http://localhost:8081/auth/admin/
+		#       docker rm -f kc-tunnel   # when done
+		@kc_admin path /auth/admin* /auth/realms/master/*
+		respond @kc_admin 403
 		reverse_proxy cv3-keycloak:8080
 	}
 

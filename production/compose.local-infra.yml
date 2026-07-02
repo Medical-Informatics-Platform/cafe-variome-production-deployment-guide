@@ -53,8 +53,10 @@ services:
       retries: 10
       start_period: 15s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
   cv3-keycloak-postgres:
     image: postgres:16.6-alpine@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
@@ -84,8 +86,10 @@ services:
       retries: 10
       start_period: 30s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
   cv3-keycloak:
     image: quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858
@@ -117,6 +121,11 @@ services:
       KC_HTTP_ENABLED: "true"           # TLS terminates at Caddy
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
+      # Surface successful-login events in the container LOG (jboss-logging listener
+      # logs them at debug by default, i.e. invisible). With the journald driver this
+      # puts the login audit trail in the host journal alongside the DB-stored events
+      # the bootstrap enables (realm events, 1y). Failures already log at warn.
+      KC_SPI_EVENTS_LISTENER_JBOSS_LOGGING_SUCCESS_LEVEL: info
     networks: [cv_edge, cv_egress, cv_kcdb]
     healthcheck:
       test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
@@ -125,8 +134,10 @@ services:
       retries: 10
       start_period: 90s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
   cv3-redis:
     # The CV3 backends use Redis for caching/locking/metrics (confirmed from the image
@@ -155,8 +166,10 @@ services:
       retries: 10
       start_period: 10s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
 
   cv3-mongo:
     image: mongo:8.0@sha256:45b422ba19c0f028a917ea43746ab8e8cdbdaaeb50d2e6e634a17c59666e0dbb
@@ -189,5 +202,7 @@ services:
       retries: 10
       start_period: 30s
     logging:
-      driver: json-file
-      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+      # Journald: survives container recreation + host reboots; retention via
+      # deploy/journald-cv3.conf (1 year). See docker-compose.yml header note.
+      driver: journald
+      options: { tag: "{{.Name}}" }
