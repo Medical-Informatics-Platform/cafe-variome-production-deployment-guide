@@ -7,3 +7,8 @@ production/config/*.json
 production/secrets/
 production/backups/
 *.unseal
+
+# Real (host-specific) ansible inventory - keep locally next to the committed
+# *.example files for manual A-Z passes; never commit (contains IP + credentials).
+production/inventory/inventory
+production/inventory/host_vars/cafe-variome-node/vars.yml

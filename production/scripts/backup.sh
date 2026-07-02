@@ -26,7 +26,10 @@ docker exec cv3-mongo mongodump --quiet --archive --gzip \
   > "$OUT/mongo.archive.gz"
 
 echo "== Keycloak Postgres (pg_dump) =="
-docker exec cv3-keycloak-postgres sh -c "pg_dump -U \"\${POSTGRES_USER:-keycloak}\" keycloak" | gzip > "$OUT/keycloak-pg.sql.gz"
+# --clean --if-exists: the dump carries DROP ... IF EXISTS statements, so restore.sh
+# can apply it to a database that already has the Keycloak schema (a plain dump would
+# fail on every CREATE with "already exists").
+docker exec cv3-keycloak-postgres sh -c "pg_dump --clean --if-exists -U \"\${POSTGRES_USER:-keycloak}\" keycloak" | gzip > "$OUT/keycloak-pg.sql.gz"
 
 echo "== Vault file storage (volume tar) =="
 # Vault file backend has no snapshot API; tar the data volume. Unseal keys live in

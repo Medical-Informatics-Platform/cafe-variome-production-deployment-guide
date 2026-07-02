@@ -104,7 +104,17 @@ All routes should be `200`; the OIDC issuer should be `https://$CV_PUBLIC_HOST/a
 ## 5. Operations
 
 - **After any host or Vault restart** Vault boots *sealed*: `./scripts/unseal_vault.sh`, then `./cv.sh restart` the backends. (No cloud auto-unseal here - by design.)
-- **Backups** (local-infra): `./scripts/backup.sh` → one encryptable tarball under `backups/` (Mongo dump + Keycloak Postgres + Vault data + secrets/config). Move it off-host. Restore with `./scripts/restore.sh backups/<ts>.tar` then re-unseal Vault. In external-infra mode the managed services own their backups.
+- **Backups** (local-infra): `./scripts/backup.sh` → one encryptable tarball under `backups/` (Mongo dump + Keycloak Postgres dump with `--clean` + Vault data + secrets/config, mode 0600). **Move it off-host** (it contains the Vault unseal keys); schedule it (e.g. a dockeruser cron) at whatever RPO you can afford to lose.
+- **Restore**:
+
+  ```bash
+  ./scripts/restore.sh backups/<ts>.tar   # stops backends+Keycloak, restores Mongo/Postgres/Vault, restarts infra
+  ./scripts/unseal_vault.sh               # Vault boots sealed - ORIGINAL unseal keys (from that backup era)
+  ./cv.sh up -d                           # start the stopped backends again
+  ```
+
+  If `VAULT_ROLE_ID`/`SECRET_ID` in the current `.env` postdate the backup, restore `.env` from the tarball's `config-secrets.tgz` first. In external-infra mode the managed services own their backups.
+- **Log retention**: containers log to the persistent host journal (1 year — see SECURITY.md § 6). Access log queries: `sudo journalctl CONTAINER_NAME=cv-proxy --since "..."`. Watch `journalctl --disk-usage` against the 10G cap.
 - **Image updates**: `renovate.json` opens grouped PRs for digest/version bumps (CV3 app images and infra images separately); majors are gated behind the dependency dashboard. The brookeslab images move under `:latest` - Renovate tracks the digest.
 - **Rotate** the bootstrap-only values (`KEYCLOAK_CLIENT_SECRET`, the initial admin password) after go-live; the `KEYCLOAK_CLIENT_SECRET`/`ADMIN_*` env on the db-manager can be blanked once the first install has run.
 
