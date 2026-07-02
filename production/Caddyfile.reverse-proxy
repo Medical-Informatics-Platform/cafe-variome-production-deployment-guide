@@ -1,0 +1,51 @@
+# TLS front-end for CV3. Terminates HTTPS for ${CV_PUBLIC_HOST} and path-routes to
+# the frontend + backend services. Caddy obtains/renews the cert automatically
+# (egress is forced through cv-tls-egress-proxy - see compose.reverse-proxy.yml).
+#
+# Public routes mirror the upstream Apache vhost:
+#   /            -> frontend (SPA, /discover, /meta-discover, /callback*.html, assets)
+#   /api         -> admin backend     (:5000)   [prefix stripped]
+#   /query       -> query backend     (:5100)   [prefix stripped]
+#   /federation  -> network backend   (:5200)   [prefix stripped]
+#   /auth        -> Keycloak          (:8080)   [local-infra only]
+
+{
+	# Force IPv4-only TCP listeners. Rootless Docker forwards ports with pasta in
+	# --ipv4-only mode, which only forwards container listeners bound on IPv4. Plain
+	# `0.0.0.0` still leaves Caddy on a dual-stack [::] socket (shows under tcp6), which
+	# pasta won't forward - so the published 80/443 never reach the host. The `tcp4/`
+	# network prefix makes Go open an AF_INET socket that pasta forwards.
+	default_bind tcp4/0.0.0.0
+	acme_ca {$CV_ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
+}
+
+{$CV_PUBLIC_HOST} {
+	# email -> public Let's Encrypt (needs inbound 80/443); "internal" -> Caddy CA.
+	tls {$CV_TLS:admin@example.com}
+	encode zstd gzip
+
+	# Backend APIs. handle_path strips the public prefix so the backend sees the
+	# request at root, matching the upstream Apache `ProxyPass /api http://:5000`.
+	handle_path /api/* {
+		reverse_proxy cv3-backend-admin:5000
+	}
+	handle_path /query/* {
+		reverse_proxy cv3-backend-query:5100
+	}
+	handle_path /federation/* {
+		reverse_proxy cv3-backend-network:5200
+	}
+
+	# Keycloak - only reachable when the local-infra overlay runs it; configure that
+	# Keycloak with KC_HTTP_RELATIVE_PATH=/auth (see compose.local-infra.yml). For an
+	# EXTERNAL Keycloak, delete this block and set backend_config.json Keycloak.URL +
+	# the frontend redirect URLs to the external host.
+	handle /auth/* {
+		reverse_proxy cv3-keycloak:8080
+	}
+
+	# Everything else -> the SPA frontend (Caddy auto-sets X-Forwarded-* upstream).
+	handle {
+		reverse_proxy cv3-frontend:80
+	}
+}

@@ -1,0 +1,115 @@
+# TLS reverse proxy for CV3 - the SOLE public ingress. Enabled by setting
+# CV_PUBLIC_HOST (cv.sh adds this file). Topology:
+#
+#   browser ──443──► cv-proxy (Caddy, auto-TLS) ──► cv3-frontend / backends (path routing)
+#   cv-proxy ──proxy_egress (internal, no gateway)──► cv-tls-egress-proxy ──wan──► Let's Encrypt
+#
+# Caddy terminates TLS for the whole stack (sees plaintext, holds the key), so it is
+# kept OFF `wan`; its only outbound path is the ACME-only Squid below. CV3's own
+# service ports stay internal (docker-compose.yml publishes none) - only 80/443 here.
+# In general, this is a measure against possible supply-chain compromise of docker images.
+#
+# Requirements (README § Production): host can bind 80/443 (deploy/unprivileged-ports.conf),
+# inbound 80/443 reachable for HTTP-01, CV_PUBLIC_HOST resolves to this host.
+
+services:
+  cv-proxy:
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    container_name: cv-proxy
+    restart: always
+    # Caddy is pinned to IPv4 TCP listeners via `default_bind tcp4/0.0.0.0` in the
+    # Caddyfile so rootless pasta (--ipv4-only) forwards the published 80/443.
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 200
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    tmpfs: ["/tmp:size=32m"]
+    depends_on:
+      cv-tls-egress-proxy:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    environment:
+      CV_PUBLIC_HOST: ${CV_PUBLIC_HOST:?set CV_PUBLIC_HOST to enable the reverse proxy}
+      # email = public Let's Encrypt; "internal" = Caddy self-signed CA (no inbound).
+      CV_TLS: ${CV_TLS:-${ACME_EMAIL:-admin@example.com}}
+      CV_ACME_CA: ${CV_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      # Caddy has no direct internet route; its ACME client egresses only via the proxy.
+      HTTP_PROXY: http://cv-tls-egress-proxy:3128
+      HTTPS_PROXY: http://cv-tls-egress-proxy:3128
+      http_proxy: http://cv-tls-egress-proxy:3128
+      https_proxy: http://cv-tls-egress-proxy:3128
+      NO_PROXY: localhost,127.0.0.1,::1,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-keycloak
+      no_proxy: localhost,127.0.0.1,::1,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-keycloak
+    volumes:
+      - ./Caddyfile.reverse-proxy:/etc/caddy/Caddyfile:ro
+      - cv_caddy_data:/data
+      - cv_caddy_config:/config
+    networks:
+      cv_ingress: {}       # inbound publish of 80/443. Rootless pasta cannot forward host
+                           # ports to a container that is ONLY on internal:true networks,
+                           # so the public proxy needs one non-internal bridge here.
+      cv_edge: {}          # reach frontend + the 3 public backends (+ keycloak, local-infra)
+      cv_proxy_egress: {}  # ACME egress via cv-tls-egress-proxy (its HTTP(S)_PROXY target)
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+  # Dedicated, Let's-Encrypt-only egress proxy for cv-proxy (Caddy). The only thing
+  # on `wan` from this overlay; allowlist permits only the ACME endpoints.
+  # Stock ubuntu/squid + our mounted policy (no custom image needed for CV3 
+  cv-tls-egress-proxy:
+    image: ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    container_name: cv-tls-egress-proxy
+    restart: always
+    # Run squid in the FOREGROUND (-N), else the image default daemonizes and the
+    # container's main process exits → crash loop. -Y faster startup, -C no signal traps.
+    command: ["-f", "/etc/squid/squid.conf", "-NYC"]
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]  # squid drops to the proxy user
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 200
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    # squid drops to the proxy user (uid/gid 13); pin the writable tmpfs to it so the
+    # swap-dir init + logging work under the read-only rootfs.
+    tmpfs:
+      - "/var/spool/squid:rw,size=64m,uid=13,gid=13,mode=0775"
+      - "/var/log/squid:rw,size=16m,uid=13,gid=13,mode=0775"
+      - "/run:size=16m"
+    volumes:
+      - ./squid.reverse-proxy.conf:/etc/squid/squid.conf:ro
+      - ./allowed_domains.reverse-proxy.txt:/etc/squid/allowed_domains.reverse-proxy.txt:ro
+    networks:
+      cv_proxy_egress: {}
+      wan: {}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/3128'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+networks:
+  # Public ingress bridge for cv-proxy ONLY (so rootless pasta can forward 80/443 to it).
+  # A non-internal bridge inherently carries an egress route too; cv-proxy's outbound is
+  # still pointed at the ACME squid via HTTP(S)_PROXY, and only cv-proxy joins this net —
+  # the backends/frontend/infra stay on internal:true networks with no egress. See SECURITY.md.
+  cv_ingress:
+    driver: bridge
+  cv_proxy_egress:
+    internal: true
+  wan:
+    driver: bridge
+
+volumes:
+  cv_caddy_data: {}
+  cv_caddy_config: {}

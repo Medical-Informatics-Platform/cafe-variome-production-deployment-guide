@@ -1,13 +1,13 @@
-# CV3 — local dev / staging
+# CV3 - local dev / staging
 
 A throwaway local quick-start for **developers**: a Debian VM running CV3 in **dev mode**
 with direct host ports and convenience bootstrap scripts. It is the fast inner-loop for
-trying the stack out — it is **not** a deployment target.
+trying the stack out - it is **not** a deployment target.
 
 > ⚠️ **Not hardened. Do not expose.** This path deliberately trades security for speed:
 > Vault runs in **dev mode with a hardcoded root token**, Keycloak uses a default admin
 > (`admin`/`adminadmin`), services are published on plain `http://127.0.0.1` ports, and
-> there is no TLS. For anything reachable by others — including a shared staging server —
+> there is no TLS. For anything reachable by others - including a shared staging server —
 > use the hardened layer in [`../production/`](../production/) (see
 > [../production/README.md](../production/README.md) and
 > [../production/SECURITY.md](../production/SECURITY.md)).
@@ -17,7 +17,7 @@ trying the stack out — it is **not** a deployment target.
 | Path | Purpose |
 |---|---|
 | `Vagrantfiles/vagrant-debian13-amd64/` | Debian 13 VM (qemu, x86_64) |
-| `Vagrantfiles/vagrant-debian13-arm64/` | Debian 13 VM (qemu, arm64 — Apple Silicon) |
+| `Vagrantfiles/vagrant-debian13-arm64/` | Debian 13 VM (qemu, arm64 - Apple Silicon) |
 | `scripts/bootstrap_cv3_vault.sh` | dev Vault: enable AppRole/KV/transit, seed dev secrets, write `VAULT_ROLE_ID/SECRET_ID` to `~/cv3-deploy/.env` |
 | `scripts/bootstrap_cv3_identity.sh` | dev Keycloak realm/client + initial user, Mongo seed |
 | `scripts/update_keycloak_client.sh` | point the `test_client` redirect/web-origins at `http://127.0.0.1:5080` |
@@ -34,9 +34,8 @@ trying the stack out — it is **not** a deployment target.
    vagrant ssh
    ```
 
-2. **Inside the VM**, install Docker and deploy CV3 to `~/cv3-deploy` — use the upstream
-   curated compose from [`../work_dir/cafe-variome-production-deployment-guide/how-we-run-stuff.txt`](../work_dir/cafe-variome-production-deployment-guide/how-we-run-stuff.txt)
-   (it expects `~/cv3-deploy/{docker-compose.yml,.env,config/}`), then `docker compose up -d`.
+2. **Inside the VM**, install Docker and deploy CV3 to `~/cv3-deploy` - use the upstream
+   provided docker compose from CV3 team (it expects `~/cv3-deploy/{docker-compose.yml,.env,config/}`), then `docker compose up -d`.
 
 3. **Bootstrap** (the scripts assume `~/cv3-deploy` exists and the containers are up):
 

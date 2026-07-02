@@ -1,0 +1,71 @@
+{
+  "MongoDB": {
+    "_comment": "The image builds its Mongo URI as mongodb://{Host}:{Port}/{Database} and IGNORES User/Password (confirmed in cv3_backend_lib/models/database_collection.py). To keep Mongo auth enabled we embed the app credentials in Host (user:pass@host). authSource defaults to {Database}=cafevariome, where the bootstrap creates this user. Passwords MUST be URL-safe (the .env uses openssl rand -hex).",
+    "Host": "__MONGO_APP_USERNAME__:__MONGO_APP_PASSWORD__@cv3-mongo",
+    "Port": "27017",
+    "User": "__MONGO_APP_USERNAME__",
+    "Password": "__MONGO_APP_PASSWORD__",
+    "Database": "cafevariome",
+    "MaxJobs": 40
+  },
+  "Redis": {
+    "Host": "cv3-redis",
+    "Port": "6379",
+    "Cluster": false
+  },
+  "Keycloak": {
+    "Client": "test_client",
+    "Realm": "cafe_variome",
+    "_comment": "URLs MUST end with a trailing slash: python-keycloak 5.x builds endpoints as {URL}realms/... - without the slash you get /authrealms/... (HTTP 404) and admin/login calls fail. URL is the browser issuer (terminates at Caddy /auth); BackendURL is the in-cluster address (Keycloak runs with KC_HTTP_RELATIVE_PATH=/auth).",
+    "URL": "https://__CV_PUBLIC_HOST__/auth/",
+    "BackendURL": "http://cv3-keycloak:8080/auth/",
+    "RedirectURLs": [
+      "https://__CV_PUBLIC_HOST__/callback.html",
+      "https://__CV_PUBLIC_HOST__/callback-silent.html"
+    ]
+  },
+  "Vault": {
+    "Host": "http://cv3-vault:8200",
+    "TransitPath": "transit_cv3",
+    "KV2Path": "kv",
+    "KV2Prefix": "cv3"
+  },
+  "CORS": {
+    "AllowOrigin": ["https://__CV_PUBLIC_HOST__"],
+    "AllowMethods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    "AllowHeaders": ["Content-Type", "Authorization", "Network-Id"]
+  },
+  "Metrics": {
+    "Prometheus": { "Enabled": false, "Path": "/metrics", "Key": "" }
+  },
+  "Email": {
+    "From": { "Address": "admin@cafevariome.org", "Name": "Cafe Variome Admin" },
+    "Sender": "noreply@system.le.ac.uk",
+    "SMTP": {
+      "Host": "localhost",
+      "Port": 25,
+      "Authentication": { "Required": false, "Username": "", "Password": "" }
+    }
+  },
+  "Legacy": {
+    "NexusMode": { "Enabled": false, "AccessTokenEnabled": true },
+    "Query": true
+  },
+  "Logging": {
+    "Name": "Cafe Variome V3",
+    "Level": "INFO",
+    "MaxBytes": 10485760,
+    "BackupCount": 20,
+    "Loki": {
+      "Enabled": false,
+      "Endpoint": "",
+      "Tags": {},
+      "Auth": { "Enabled": false, "Username": "", "Password": "" }
+    }
+  },
+  "Data": {
+    "UploadPath": "data_source/",
+    "ValidFileFormats": ["vcf", "csv"],
+    "ChunkSize": 1024
+  }
+}

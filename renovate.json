@@ -1,0 +1,89 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "mergeConfidence:all-badges",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "onboarding": false,
+  "requireConfig": "optional",
+  "baseBranchPatterns": [
+    "main"
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Renovate Dashboard",
+  "timezone": "UTC",
+  "fetchChangeLogs": "pr",
+  "prBodyColumns": [
+    "Package",
+    "Type",
+    "Update",
+    "Change",
+    "Age",
+    "Adoption",
+    "Passing",
+    "Confidence"
+  ],
+  "rebaseWhen": "behind-base-branch",
+  "prConcurrentLimit": 8,
+  "prHourlyLimit": 2,
+  "separateMajorMinor": true,
+  "separateMultipleMajor": true,
+  "rollbackPrs": true,
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "vulnerabilityAlerts": {
+    "labels": [
+      "dependencies",
+      "security"
+    ]
+  },
+  "labels": [
+    "dependencies",
+    "renovate"
+  ],
+  "packageRules": [
+    {
+      "description": "Hold major bumps for manual approval from the dependency dashboard (e.g. Keycloak 26->27, Mongo 8->9).",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true,
+      "labels": [
+        "dependencies",
+        "renovate",
+        "major"
+      ]
+    },
+    {
+      "description": "Batch every digest-pinned compose image bump into one PR.",
+      "matchManagers": [
+        "docker-compose"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "groupName": "container images"
+    },
+    {
+      "description": "The brookeslab CV3 images ship as :latest@sha256 (the maintainer updates them in place and asks deployers to pull new ones). Track the digest behind :latest, separately from the pinned infra images, and never treat a digest move as a major.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "/^brookeslab\\//"
+      ],
+      "groupName": "cv3 application images (brookeslab)",
+      "pinDigests": true
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# Egress allowlist for cv-egress-proxy - the ONLY external hosts the CV3 backends
+# may reach (EXTERNAL-infra mode). A leading dot matches all subdomains.
+# Replace the examples with your real external Keycloak + Vault hostnames, then
+# `./cv.sh restart cv-egress-proxy`.
+#
+# Keycloak (browser-facing + backend) - e.g.:
+# auth.example.org
+#
+# Vault API host - e.g.:
+# vault.example.org
+#
+# NOTE: an external MongoDB is NOT reached through this HTTP proxy (Mongo wire
+# protocol); give it a dedicated private network path and add it to the backends'
+# NO_PROXY. With the local-infra overlay (CV_LOCAL_INFRA=1) this file is unused —
+# Keycloak/Vault/Mongo are internal.

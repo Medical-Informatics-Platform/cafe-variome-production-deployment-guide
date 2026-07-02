@@ -1,0 +1,165 @@
+# Cafe Variome v3 - production base compose (hardened deployment layer).
+#
+# This is the functional definition of the 7 CV3 application containers. Security
+# hardening (read-only rootfs, dropped caps, non-root, resource limits, tmpfs) lives
+# in the compose.hardening.yml OVERLAY so it stays reviewable; the TLS reverse proxy
+# and forced-egress proxy live in compose.reverse-proxy.yml + compose.egress.yml; the
+# optional self-contained Keycloak/Vault/MongoDB live in compose.local-infra.yml.
+# Always drive compose through ./cv.sh, which stacks the right files in order.
+#
+# Differences from the CV3 team provided dev compose:
+#   - images pinned by @sha256 digest (was `:latest`) - see README/Renovate.
+#   - NO host port publishes - services are internal only; the reverse proxy is the
+#     sole public ingress (compose.reverse-proxy.yml). This replaces the upstream
+#     0.0.0.0:5000/5100/5200/5080 exposure.
+#   - network segmentation (cv_edge / cv_backend / cv_egress, all internal) instead
+#     of the single default bridge.
+#   - explicit per-service `environment:` (no env_file) so each container holds only
+#     the secrets it needs.
+#   - config files mounted read-only.
+
+x-json-logging: &json_logging
+  driver: json-file
+  options:
+    max-size: "${CV_LOG_MAX_SIZE:-10m}"
+    max-file: "${CV_LOG_MAX_FILE:-3}"
+
+# Backend env common to every CV3 backend (Vault AppRole for runtime secrets).
+# CV3_BIND: the image defaults its HTTP listener to 127.0.0.1:5000 (loopback only),
+# which the reverse proxy in a separate container cannot reach (502). Set the SAME base
+# 0.0.0.0:5000 for every backend - each image adds its own baked-in port_offset to the
+# base port (admin +0 = 5000, query +100 = 5100, network +200 = 5200), matching the
+# Caddyfile routes. Do NOT bump the port per service or you double-count the offset.
+# Worker services (db-manager/scheduler/query-meta) don't serve HTTP, so it's a no-op there.
+x-backend-env: &backend_env
+  VAULT_ROLE_ID: ${VAULT_ROLE_ID:?set VAULT_ROLE_ID in .env}
+  VAULT_SECRET_ID: ${VAULT_SECRET_ID:?set VAULT_SECRET_ID in .env}
+  CV3_BIND: 0.0.0.0:5000
+
+x-backend-volumes: &backend_volumes
+  - ./config/backend_config.json:/home/appuser/.config/CV3Backend/instance_config.json:ro
+  # /app/logs (hypercorn access log) is an appuser-owned tmpfs in compose.hardening.yml
+  # - a named volume there is root-owned under userns remap and not appuser-writable.
+  # The durable record is the container's stdout/stderr (json-file logging driver).
+
+networks:
+  # Public-facing HTTP entrypoints the reverse proxy reaches (added in
+  # compose.reverse-proxy.yml). internal:true - no direct internet.
+  cv_edge:
+    internal: true
+  # Inter-service backend communication + db-manager/scheduler coordination.
+  cv_backend:
+    internal: true
+  # The lane backends use to reach Keycloak/Vault/MongoDB - either the forced-egress
+  # Squid (compose.egress.yml, external infra) or the local-infra services
+  # (compose.local-infra.yml). internal:true; the proxy/infra bridges it outward.
+  cv_egress:
+    internal: true
+
+# NOTE: the brookeslab/cv3-* images below are intentionally pinned as ":latest@sha256:...".
+# Upstream publishes new builds only to :latest (the vX.Y.Z tags are older, stale releases),
+# so the @digest is the real pin - Renovate tracks digest moves and opens PRs.
+services:
+  cv3-backend-admin:
+    image: brookeslab/cv3-backend-admin:latest@sha256:25e16342cc4d80004d96e5766c0e0a1544d1eba70be067deaf1cc89dea84ccb9
+    container_name: cv3-backend-admin
+    restart: unless-stopped
+    environment: *backend_env
+    volumes: *backend_volumes
+    networks: [cv_edge, cv_backend, cv_egress]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; socket.create_connection(('127.0.0.1',5000),3)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *json_logging
+
+  cv3-backend-query:
+    image: brookeslab/cv3-backend-query:latest@sha256:25fa6a24d9662abf3640707863fcd22679dfe265e10396d6e675c0c1e173d75b
+    container_name: cv3-backend-query
+    restart: unless-stopped
+    depends_on: [cv3-backend-database-manager, cv3-backend-scheduler]
+    environment: *backend_env   # CV3_BIND base 5000 + query's +100 offset = :5100
+    volumes: *backend_volumes
+    networks: [cv_edge, cv_backend, cv_egress]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; socket.create_connection(('127.0.0.1',5100),3)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *json_logging
+
+  cv3-backend-network:
+    image: brookeslab/cv3-backend-network:latest@sha256:c929344e84ebcf77bbc847792bc0a1638a8b00477803736f2d3973225178d875
+    container_name: cv3-backend-network
+    restart: unless-stopped
+    depends_on: [cv3-backend-database-manager, cv3-backend-scheduler]
+    environment: *backend_env   # CV3_BIND base 5000 + network's +200 offset = :5200
+    volumes: *backend_volumes
+    networks: [cv_edge, cv_backend, cv_egress]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; socket.create_connection(('127.0.0.1',5200),3)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *json_logging
+
+  cv3-backend-query-meta:
+    image: brookeslab/cv3-backend-query-meta:latest@sha256:e07fb241be045255e6878f7e1c75ece9f25e6022ff3542d39314d9967667d952
+    container_name: cv3-backend-query-meta
+    restart: unless-stopped
+    depends_on: [cv3-backend-database-manager, cv3-backend-scheduler]
+    environment:
+      <<: *backend_env
+      META_QUERY_WORKER: ${META_QUERY_WORKER:-2}
+    volumes: *backend_volumes
+    networks: [cv_backend, cv_egress]   # internal only (not proxied publicly)
+    healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
+    logging: *json_logging
+
+  cv3-backend-database-manager:
+    image: brookeslab/cv3-backend-database-manager:latest@sha256:77c234b9fb6c3544bddd45caf7036a7963536d884a9e737079efed21f2d1141d
+    container_name: cv3-backend-dbm
+    restart: unless-stopped
+    environment:
+      <<: *backend_env
+      # Bootstrap-only (safe to drop after first successful bootstrap):
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_AFFILIATION: ${ADMIN_AFFILIATION:-}
+      DB_MANAGER_WORKER: ${DB_MANAGER_WORKER:-2}
+    volumes: *backend_volumes
+    networks: [cv_backend, cv_egress]
+    healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
+    logging: *json_logging
+
+  cv3-backend-scheduler:
+    image: brookeslab/cv3-backend-scheduler:latest@sha256:9b0f07bef13d4b877e8f62ab0b4af7a5b4d3d39b1803c8d781d484a835f611f0
+    container_name: cv3-backend-scheduler
+    restart: unless-stopped
+    depends_on: [cv3-backend-database-manager]
+    environment: *backend_env
+    volumes: *backend_volumes
+    networks: [cv_backend, cv_egress]
+    healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
+    logging: *json_logging
+
+  cv3-frontend:
+    image: brookeslab/cv3-frontend:latest@sha256:563b979a616547477a6794f6e3e89d4cb0dfccc598d278ec515697510ab71dfb
+    container_name: cv3-frontend
+    restart: unless-stopped
+    volumes:
+      - ./config/frontend_admin_config.json:/usr/share/nginx/html/assets/assets/config.json:ro
+      - ./config/frontend_query_config.json:/usr/share/nginx/html/discover/assets/assets/config.json:ro
+      - ./config/frontend_query_meta_config.json:/usr/share/nginx/html/meta-discover/assets/assets/config.json:ro
+    networks: [cv_edge]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *json_logging

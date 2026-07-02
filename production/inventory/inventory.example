@@ -1,0 +1,8 @@
+# Ansible inventory for the CV3 node. Copy to your linux-server-management clone as
+# inventories/production/inventory (or pass with -i), replacing the IP with your
+# provisioned server's public address. Provision the server on any platform - this
+# guide stays platform-agnostic.
+# The host is NAMED cafe-variome-node (matching host_vars/cafe-variome-node/) with
+# its address in ansible_host - so the host vars actually apply.
+[cafe-variome-node]
+cafe-variome-node ansible_host=REPLACE_WITH_SERVER_IP

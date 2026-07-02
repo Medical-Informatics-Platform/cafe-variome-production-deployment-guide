@@ -1,0 +1,193 @@
+# Optional self-contained infra overlay (cv.sh adds this when CV_LOCAL_INFRA=1).
+# Runs hardened Keycloak + Vault (NON-dev) + MongoDB alongside CV3 so the whole
+# system stands up on one rootless host. In real production
+# prefer EXTERNAL managed Keycloak/Vault (drop this overlay; cv.sh then uses
+# compose.egress.yml instead). Infra is internal-only - reached by the backends on
+# cv_egress and by Caddy on cv_edge (Keycloak /auth); nothing here touches `wan`.
+
+networks:
+  cv_kcdb:            # Keycloak <-> its Postgres only
+    internal: true
+
+volumes:
+  cv_vault_data: {}
+  cv_mongo_data: {}
+  cv_kc_pgdata: {}
+
+services:
+  cv3-vault:
+    image: hashicorp/vault:1.18.5@sha256:750bb37c1638fa194ab37053a81618c61bb0491ddec6fccac87c07a8e6cd8166
+    container_name: cv3-vault
+    restart: always
+    command: ["vault", "server", "-config=/vault/config/vault.hcl"]
+    # Run AS the image's vault user (uid 100). The entrypoint then skips its root-only
+    # su-exec step (which needs SETGID and fails under cap_drop:ALL with
+    # "su-exec: setgroups: Operation not permitted"). Storage lives on /vault/file,
+    # which the image pre-owns as uid 100, so a fresh volume is writable with no chown.
+    user: "100:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    # mlock is disabled in vault.hcl (no swap on this host), so IPC_LOCK isn't needed.
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 200
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    mem_limit: "512m"
+    cpus: "0.5"
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200   # for the container's own CLI (bootstrap/unseal)
+      # The image entrypoint tries `setcap cap_ipc_lock` on the vault binary, which
+      # fails (and crash-loops) under cap_drop:ALL + no-new-privileges. mlock is already
+      # disabled in vault.hcl, so IPC_LOCK isn't needed - tell the entrypoint to skip it.
+      SKIP_SETCAP: "true"
+    volumes:
+      - ./vault/vault.hcl:/vault/config/vault.hcl:ro
+      - cv_vault_data:/vault/file
+    tmpfs: ["/tmp:size=32m"]
+    networks: [cv_egress]
+    healthcheck:
+      # Healthy when the API answers, whether unsealed (0) or sealed (exit 2).
+      test: ["CMD-SHELL", "vault status >/dev/null 2>&1 || test $? -eq 2"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+  cv3-keycloak-postgres:
+    image: postgres:16.6-alpine@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
+    container_name: cv3-keycloak-postgres
+    restart: always
+    user: "70:70"                       # alpine postgres uid; volume ownership is seeded from the image
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 200
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    mem_limit: "512m"
+    cpus: "0.5"
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: ${KC_DB_USERNAME:-keycloak}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD in .env}
+    volumes:
+      - cv_kc_pgdata:/var/lib/postgresql/data
+    tmpfs: ["/tmp:size=32m", "/var/run/postgresql:size=16m"]
+    networks: [cv_kcdb]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KC_DB_USERNAME:-keycloak} -d keycloak"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+  cv3-keycloak:
+    image: quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858
+    container_name: cv3-keycloak
+    restart: always
+    # Prod mode (real DB), behind the Caddy TLS front at the /auth path. `start`
+    # (not --optimized) augments at boot, so the rootfs must be writable - tighten
+    # to read_only with a pre-built --optimized image later (see README/SECURITY).
+    command: ["start", "--optimized=false"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 400
+    ulimits:
+      nofile: { soft: 1024, hard: 4096 }
+    mem_limit: "1g"
+    cpus: "1.0"
+    depends_on:
+      cv3-keycloak-postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://cv3-keycloak-postgres:5432/keycloak
+      KC_DB_USERNAME: ${KC_DB_USERNAME:-keycloak}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD in .env}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      KC_HOSTNAME: https://${CV_PUBLIC_HOST}/auth
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HTTP_ENABLED: "true"           # TLS terminates at Caddy
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+    networks: [cv_edge, cv_egress, cv_kcdb]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+  cv3-redis:
+    # The CV3 backends use Redis for caching/locking/metrics (confirmed from the image
+    # config schema: Redis.Host/Port/Cluster). Unauthenticated in the upstream model —
+    # safe here because it is reachable only on the internal cv_egress lane, never wan.
+    # Cache/lock only, so no persistence (--save "" --appendonly no) and no volume.
+    image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    container_name: cv3-redis
+    restart: always
+    user: "999:1000"                    # redis user in the image; avoids the gosu drop
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 100
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    mem_limit: "320m"
+    cpus: "0.5"
+    tmpfs: ["/tmp:size=16m"]
+    networks: [cv_egress]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+  cv3-mongo:
+    image: mongo:8.0@sha256:45b422ba19c0f028a917ea43746ab8e8cdbdaaeb50d2e6e634a17c59666e0dbb
+    container_name: cv3-mongo
+    restart: always
+    read_only: true
+    # Keeps the image's entrypoint (root) so it can chown /data on first run, then
+    # drops to the mongodb user - hence the narrow cap set instead of cap_drop-only.
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 300
+    ulimits:
+      nofile: { soft: 1024, hard: 4096 }
+    mem_limit: "1g"
+    cpus: "1.0"
+    init: true
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-cv3root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
+      MONGO_INITDB_DATABASE: cafevariome
+    volumes:
+      - cv_mongo_data:/data/db
+    tmpfs: ["/tmp:size=64m", "/data/configdb:size=32m"]
+    networks: [cv_egress]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok' | grep -q 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }

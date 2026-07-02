@@ -1,0 +1,75 @@
+# Forced-egress overlay for EXTERNAL-infra mode (cv.sh adds this when CV_LOCAL_INFRA
+# != 1). The CV3 backends must reach an external Keycloak + Vault; this routes that
+# outbound HTTP(S) through an allowlisting Squid so a compromised backend can only
+# reach the declared IAM/secret endpoints - nothing else. (When CV_LOCAL_INFRA=1
+# this file is NOT loaded: Keycloak/Vault/Mongo are internal on cv_egress instead.)
+#
+# NOTE: Squid proxies HTTP(S) only. Keycloak (OIDC/HTTP) and Vault (HTTP API) go
+# through it; an EXTERNAL MongoDB speaks the Mongo wire protocol (TCP), which this
+# proxy does NOT carry - give external Mongo its own private network path (VPC/peer)
+# and add it to NO_PROXY. The self-contained local-infra path avoids this entirely.
+
+x-backend-egress: &backend_egress
+  environment:
+    HTTP_PROXY: http://cv-egress-proxy:3128
+    HTTPS_PROXY: http://cv-egress-proxy:3128
+    http_proxy: http://cv-egress-proxy:3128
+    https_proxy: http://cv-egress-proxy:3128
+    NO_PROXY: localhost,127.0.0.1,::1,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-frontend
+    no_proxy: localhost,127.0.0.1,::1,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-frontend
+
+services:
+  cv-egress-proxy:
+    image: ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    container_name: cv-egress-proxy
+    restart: always
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 200
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    tmpfs:
+      - "/var/spool/squid:size=64m"
+      - "/var/log/squid:size=16m"
+      - "/run:size=16m"
+    volumes:
+      - ./squid.cv-egress.conf:/etc/squid/squid.conf:ro
+      - ./allowed_domains.cv-egress.txt:/etc/squid/allowed_domains.cv-egress.txt:ro
+    networks:
+      cv_egress: {}
+      wan: {}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/3128'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "${CV_LOG_MAX_SIZE:-10m}", max-file: "${CV_LOG_MAX_FILE:-3}" }
+
+  # Force each backend's outbound HTTP(S) through the egress proxy. Compose merges
+  # these environment maps with the base service definitions (additive).
+  cv3-backend-admin:
+    <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
+  cv3-backend-query:
+    <<: *backend_egress
+  cv3-backend-network:
+    <<: *backend_egress
+  cv3-backend-query-meta:
+    <<: *backend_egress
+  cv3-backend-database-manager:
+    <<: *backend_egress
+  cv3-backend-scheduler:
+    <<: *backend_egress
+
+networks:
+  cv_egress:
+    internal: true
+  wan:
+    driver: bridge

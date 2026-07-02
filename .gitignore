@@ -1,0 +1,9 @@
+.DS_Store
+work_dir/
+
+# CV3 production deployment - secrets and rendered (host-specific) config
+production/.env
+production/config/*.json
+production/secrets/
+production/backups/
+*.unseal
