@@ -63,6 +63,8 @@ chmod +x cv.sh scripts/*.sh
 
 `VAULT_ROLE_ID`/`VAULT_SECRET_ID` stay `CHANGE_ME` for now - the bootstrap fills them.
 
+`cv.sh` runs `scripts/validate-env.sh` before anything that starts containers.
+
 ## 3. Deploy (local-infra mode)
 
 The backends need Vault AppRole credentials that only exist after Vault is initialised, so bring up the **infra first**, bootstrap, then the rest:
@@ -77,13 +79,15 @@ The backends need Vault AppRole credentials that only exist after Vault is initi
 ./scripts/bootstrap_local_infra.sh
 
 # 3c. MOVE secrets/vault-init.json OFFLINE, then delete it from the host.
+#     unseal_vault.sh takes the shares on stdin (--stdin) or in CV_UNSEAL_KEYS, so you
+#     do NOT have to leave them on the box to stay able to unseal.
 
-# 3d. start everything. On first start the db-manager runs the app install
-#     (seeds Mongo incl. config docs, writes the Vault KV, creates the initial admin).
+# 3d. start everything. cv.sh gates on validate-env.sh here (whole-stack start), so a
+#     missing/placeholder secret stops the deploy instead of half-starting it.
+#     On first start the db-manager runs the app install (seeds Mongo incl. config docs,
+#     writes the Vault KV, creates the initial admin).
 ./cv.sh up -d
 ./cv.sh logs -f cv3-backend-dbm          # watch: "Created initial admin user ... with password cv_admin"
-
-./scripts/validate-env.sh                # fail-closed gate - all secrets set
 ```
 
 The initial admin is `test_client_admin` (temp password `cv_admin`, must change at first login). For **external-infra mode**, skip 3a–3c, point `config/backend_config.json` at your real endpoints, and ensure that Vault/Keycloak already hold the CV3 AppRole + realm/client.
@@ -103,20 +107,45 @@ All routes should be `200`; the OIDC issuer should be `https://$CV_PUBLIC_HOST/a
 
 ## 5. Operations
 
-- **After any host or Vault restart** Vault boots *sealed*: `./scripts/unseal_vault.sh`, then `./cv.sh restart` the backends. (No cloud auto-unseal here - by design.)
-- **Backups** (local-infra): `./scripts/backup.sh` → one encryptable tarball under `backups/` (Mongo dump + Keycloak Postgres dump with `--clean` + Vault data + secrets/config, mode 0600). **Move it off-host** (it contains the Vault unseal keys); schedule it (e.g. a dockeruser cron) at whatever RPO you can afford to lose.
-- **Restore**:
+- **After any host or Vault restart** Vault boots *sealed*. Supply the shares without
+  storing them on the box:
 
   ```bash
-  ./scripts/restore.sh backups/<ts>.tar   # stops backends+Keycloak, restores Mongo/Postgres/Vault, restarts infra
-  ./scripts/unseal_vault.sh               # Vault boots sealed - ORIGINAL unseal keys (from that backup era)
-  ./cv.sh up -d                           # start the stopped backends again
+  ./scripts/unseal_vault.sh --stdin        # paste 3 shares, then Ctrl-D
+  CV_UNSEAL_KEYS="$(pass cv3/unseal)" ./scripts/unseal_vault.sh   # or from a secret manager
+  ./scripts/unseal_vault.sh                # falls back to secrets/vault-init.json (warns)
+  ```
+
+  Then `./cv.sh restart` the backends. (No cloud auto-unseal here - by design.)
+- **Backups** (local-infra): `./scripts/backup.sh` → one tarball under `backups/` (Mongo
+  dump + Keycloak Postgres dump with `--clean` + Vault data + secrets/config, mode 0600).
+  **Encrypt it**: set `CV_BACKUP_AGE_RECIPIENT` (or `CV_BACKUP_GPG_RECIPIENT`) in `.env`
+  and the script encrypts it here and shreds the plaintext; otherwise it warns, because
+  that one file holds the unseal shares, both DBs and `.env`. **Move it off-host** and
+  schedule it (e.g. a dockeruser cron) at whatever RPO you can afford to lose — nothing
+  in this repo schedules or ships it for you.
+- **Restore** (accepts `.tar`, `.tar.age`, `.tar.gpg`):
+
+  ```bash
+  ./scripts/restore.sh backups/<ts>.tar    # stops backends+Keycloak, restores Mongo/Postgres/Vault, restarts infra
+  ./scripts/unseal_vault.sh --stdin        # Vault boots sealed - ORIGINAL shares (from that backup era)
+  ./cv.sh up -d                            # start the stopped backends again
   ```
 
   If `VAULT_ROLE_ID`/`SECRET_ID` in the current `.env` postdate the backup, restore `.env` from the tarball's `config-secrets.tgz` first. In external-infra mode the managed services own their backups.
 - **Log retention**: containers log to the persistent host journal (1 year — see SECURITY.md § 6). Access log queries: `sudo journalctl CONTAINER_NAME=cv-proxy --since "..."`. Watch `journalctl --disk-usage` against the 10G cap.
 - **Image updates**: `renovate.json` opens grouped PRs for digest/version bumps (CV3 app images and infra images separately); majors are gated behind the dependency dashboard. The brookeslab images move under `:latest` - Renovate tracks the digest.
 - **Rotate** the bootstrap-only values (`KEYCLOAK_CLIENT_SECRET`, the initial admin password) after go-live; the `KEYCLOAK_CLIENT_SECRET`/`ADMIN_*` env on the db-manager can be blanked once the first install has run.
+- **Rotate the Vault AppRole credential before it expires.** `bootstrap_local_infra.sh` issues it with `secret_id_ttl=2160h` (90 days; override with `VAULT_APPROLE_SECRET_ID_TTL`) instead of the forever credential. **Nothing warns you unless you setup an alert on your own** as the date approaches - put it in a calendar. To rotate:
+
+  ```bash
+  # needs a Vault token with the cv3 policy (the bootstrap root token is revoked;
+  # regenerate one with `vault operator generate-root` if you have no other admin path)
+  docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=<token> cv3-vault \
+    vault write -f -field=secret_id auth/approle/role/cv3/secret-id
+  # put the new value in .env as VAULT_SECRET_ID, keep mode 600, then:
+  ./cv.sh up -d
+  ```
 
 ## Troubleshooting (rootless specifics)
 

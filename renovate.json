@@ -59,14 +59,15 @@
       ]
     },
     {
-      "description": "Batch every digest-pinned compose image bump into one PR.",
+      "description": "Batch every digest-pinned compose image bump into one PR, and pin any image added as a bare tag. pinDigests was previously set only on the brookeslab rule, so a new infra image written as repo:tag would have stayed unpinned - which breaks the 'every image is pinned by digest' guarantee in SECURITY.md.",
       "matchManagers": [
         "docker-compose"
       ],
       "matchDatasources": [
         "docker"
       ],
-      "groupName": "container images"
+      "groupName": "container images",
+      "pinDigests": true
     },
     {
       "description": "The brookeslab CV3 images ship as :latest@sha256 (the maintainer updates them in place and asks deployers to pull new ones). Track the digest behind :latest, separately from the pinned infra images, and never treat a digest move as a major.",

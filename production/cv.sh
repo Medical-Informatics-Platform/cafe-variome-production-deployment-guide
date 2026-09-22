@@ -43,4 +43,42 @@ if [ -n "${CV_PUBLIC_HOST:-}" ] && [ -f compose.reverse-proxy.yml ]; then
   files+=(-f compose.reverse-proxy.yml)
 fi
 
+# Fail-closed secrets gate. SECURITY.md calls validate-env.sh a gate that "refuses to
+# deploy", so it has to actually run before anything starts - not as a step the runbook
+# asks you to remember afterwards. Only gate commands that can START containers; config/
+# ps/logs/down stay usable on a half-configured box (that is when you need them most).
+#
+# A TARGETED start (`./cv.sh up -d cv3-vault ...`) only warns. That is the documented
+# bootstrap step 3a: Vault has to be running before bootstrap_local_infra.sh can mint
+# the AppRole, so VAULT_ROLE_ID/SECRET_ID are legitimately still placeholders then.
+# A whole-stack start is what gets enforced.
+case "${1:-}" in
+  up|create|run|start|restart)
+    if [ "${CV_SKIP_ENV_CHECK:-0}" != "1" ]; then
+      targeted=0
+      for a in "${@:2}"; do
+        case "$a" in
+          -*) ;;                      # flags (-d, --build, ...) are not service names
+          *) targeted=1; break ;;
+        esac
+      done
+      if [ "$targeted" = "1" ]; then
+        "$here/scripts/validate-env.sh" || {
+          echo
+          echo "NOTE: targeted '$1' - continuing anyway (bootstrap path). The whole-stack"
+          echo "      './cv.sh $1' will refuse until the above is fixed."
+        }
+      else
+        "$here/scripts/validate-env.sh" || {
+          echo
+          echo "Refusing to '$1' the whole stack. Fix .env, or override once with:"
+          echo "      CV_SKIP_ENV_CHECK=1 ./cv.sh $*"
+          exit 1
+        }
+      fi
+      echo
+    fi
+    ;;
+esac
+
 exec docker compose --env-file .env "${files[@]}" "$@"
