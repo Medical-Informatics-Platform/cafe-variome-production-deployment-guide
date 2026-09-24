@@ -23,6 +23,10 @@ services:
     image: ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
     container_name: cv-egress-proxy
     restart: always
+    # Run squid in the FOREGROUND (-N), else the image default daemonizes and the
+    # container's main process exits → crash loop. -Y faster startup, -C no signal traps.
+    # (Same as cv-tls-egress-proxy in compose.reverse-proxy.yml - keep the two in step.)
+    command: ["-f", "/etc/squid/squid.conf", "-NYC"]
     read_only: true
     cap_drop: ["ALL"]
     cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]
@@ -30,9 +34,14 @@ services:
     pids_limit: 200
     ulimits:
       nofile: { soft: 1024, hard: 2048 }
+    mem_limit: "256m"
+    cpus: "0.5"
+    # squid drops to the proxy user (uid/gid 13); pin the writable tmpfs to it so the
+    # swap-dir init + logging work under the read-only rootfs. Without the uid/gid the
+    # dirs are root-owned and squid exits with "Permission denied" on cache_dir/log init.
     tmpfs:
-      - "/var/spool/squid:size=64m"
-      - "/var/log/squid:size=16m"
+      - "/var/spool/squid:rw,size=64m,uid=13,gid=13,mode=0775"
+      - "/var/log/squid:rw,size=16m,uid=13,gid=13,mode=0775"
       - "/run:size=16m"
     volumes:
       - ./squid.cv-egress.conf:/etc/squid/squid.conf:ro
@@ -54,6 +63,8 @@ services:
 
   # Force each backend's outbound HTTP(S) through the egress proxy. Compose merges
   # these environment maps with the base service definitions (additive).
+  # Every backend must wait for the proxy: it is their only route to Keycloak/Vault,
+  # so one that starts first fails its initial AppRole login / OIDC discovery.
   cv3-backend-admin:
     <<: *backend_egress
     depends_on:
@@ -61,14 +72,29 @@ services:
         condition: service_healthy
   cv3-backend-query:
     <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
   cv3-backend-network:
     <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
   cv3-backend-query-meta:
     <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
   cv3-backend-database-manager:
     <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
   cv3-backend-scheduler:
     <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
 
 networks:
   cv_egress:

@@ -48,7 +48,27 @@ if [ "$(vstatus | python3 -c 'import json,sys;print(json.load(sys.stdin)["initia
     vault operator init -key-shares=5 -key-threshold=3 -format=json > "$INIT"
   chmod 600 "$INIT"
 fi
-ROOT_TOKEN="$(python3 -c "import json;print(json.load(open('$INIT'))['root_token'])")"
+# The root token is revoked at the end of a successful run and stripped from $INIT, so
+# a RE-RUN has to get one from somewhere else. Accept it from the environment, and fail
+# with instructions rather than a KeyError traceback.
+ROOT_TOKEN="${VAULT_ROOT_TOKEN:-${VAULT_TOKEN:-}}"
+if [ -z "$ROOT_TOKEN" ]; then
+  ROOT_TOKEN="$(python3 -c "import json;print(json.load(open('$INIT')).get('root_token') or '')")"
+fi
+if [ -z "$ROOT_TOKEN" ]; then
+  cat >&2 <<EOF
+ERROR: no Vault root token available.
+  This Vault is already initialised and the bootstrap token was revoked (by design -
+  see the end of this script). To re-run the bootstrap, mint a fresh root token from
+  the unseal shares and pass it in:
+
+    docker exec -it -e VAULT_ADDR=http://127.0.0.1:8200 cv3-vault vault operator generate-root
+    VAULT_ROOT_TOKEN=<token> ./scripts/bootstrap_local_infra.sh
+
+  (Or re-run with CV_KEEP_VAULT_ROOT_TOKEN=1 to keep it afterwards.)
+EOF
+  exit 1
+fi
 
 if [ "$(vstatus | python3 -c 'import json,sys;print(json.load(sys.stdin)["sealed"])')" = "True" ]; then
   echo "== Vault: unsealing =="
@@ -75,13 +95,32 @@ path "transit_cv3/encrypt/*" { capabilities = ["create","update","read"] }
 path "transit_cv3/decrypt/*" { capabilities = ["create","update","read"] }
 POL
 vt policy write cv3-policy /tmp/cv3-policy.hcl >/dev/null
-vt write auth/approle/role/cv3 token_policies="cv3-policy" >/dev/null
+# Bound the credentials instead of issuing an eternal one. Defaults give a
+# secret_id that survives restarts but not forever, and short-lived tokens that are
+# renewed by the client:
+#   secret_id_ttl        - how long the .env credential stays usable (default 90d)
+#   token_ttl/max_ttl    - lifetime of the tokens it mints
+#   secret_id_num_uses=0 - unlimited logins within the TTL (each backend logs in, and
+#                          they restart independently, so a use-count would break them)
+# Rotate before expiry with:
+#   docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=<token> cv3-vault \
+#     vault write -f auth/approle/role/cv3/secret-id
+# then write the new secret_id into .env and restart the backends.
+vt write auth/approle/role/cv3 \
+  token_policies="cv3-policy" \
+  secret_id_ttl="${VAULT_APPROLE_SECRET_ID_TTL:-2160h}" \
+  secret_id_num_uses=0 \
+  token_ttl="${VAULT_APPROLE_TOKEN_TTL:-1h}" \
+  token_max_ttl="${VAULT_APPROLE_TOKEN_MAX_TTL:-24h}" >/dev/null
 ROLE_ID="$(vt read -field=role_id auth/approle/role/cv3/role-id)"
 SECRET_ID="$(vt write -field=secret_id -f auth/approle/role/cv3/secret-id)"
-vt kv put kv/cv3 keycloak_client_secret="$KEYCLOAK_CLIENT_SECRET" secret_key="$(openssl rand -hex 16)" >/dev/null
+vt kv put kv/cv3 keycloak_client_secret="$KEYCLOAK_CLIENT_SECRET" secret_key="$(openssl rand -hex 32)" >/dev/null
+chmod 600 .env
 sed -i "s|^VAULT_ROLE_ID=.*|VAULT_ROLE_ID=${ROLE_ID}|"   .env
 sed -i "s|^VAULT_SECRET_ID=.*|VAULT_SECRET_ID=${SECRET_ID}|" .env
+chmod 600 .env
 echo "   VAULT_ROLE_ID/SECRET_ID written to .env (restart backends to pick up)."
+echo "   AppRole secret_id TTL: ${VAULT_APPROLE_SECRET_ID_TTL:-2160h} - diarise the rotation."
 
 # NOTE: this script only provisions the PREREQUISITES the cv3 db-manager cannot create
 # itself - a unsealed Vault with the cv3 AppRole, and a Keycloak realm+client whose
@@ -138,6 +177,33 @@ mongo_root() { docker exec cv3-mongo mongosh --quiet -u "$MONGO_USER" -p "$MONGO
 mongo_root "db.getSiblingDB('cafevariome').runCommand({createUser:'$MONGO_APP_USERNAME',pwd:'$MONGO_APP_PASSWORD',roles:[{role:'dbOwner',db:'cafevariome'}]})" 2>/dev/null \
   || mongo_root "db.getSiblingDB('cafevariome').updateUser('$MONGO_APP_USERNAME',{pwd:'$MONGO_APP_PASSWORD',roles:[{role:'dbOwner',db:'cafevariome'}]})"
 
+# The root token is only needed for this bootstrap. Leaving it live (and in
+# secrets/vault-init.json) means a permanent credential sitting next to the
+# Vault it opens. Revoke it here; re-create one from the unseal keys if ever needed:
+#   docker exec -e VAULT_ADDR=http://127.0.0.1:8200 cv3-vault vault operator generate-root
+if [ "${CV_KEEP_VAULT_ROOT_TOKEN:-0}" = "1" ]; then
+  echo "== Vault: KEEPING the root token (CV_KEEP_VAULT_ROOT_TOKEN=1) =="
+else
+  echo "== Vault: revoking the bootstrap root token =="
+  if vt token revoke -self >/dev/null 2>&1; then
+    python3 - "$INIT" <<'PY'
+import json, os, stat, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d.pop("root_token", None)
+d["root_token_revoked"] = True
+d["note"] = ("root token revoked after bootstrap; regenerate with "
+             "'vault operator generate-root' using these unseal keys if needed")
+with open(p, "w") as fh:
+    json.dump(d, fh, indent=2)
+os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
+PY
+    echo "   revoked, and removed from $INIT (unseal keys retained)."
+  else
+    echo "   WARN: could not revoke the root token - revoke it manually."
+  fi
+fi
+
 echo
 echo "DONE (prerequisites provisioned)."
 echo "  realm=$REALM client=$CLIENT  (service account: service-account-$CLIENT)"
@@ -145,5 +211,6 @@ echo "  Vault AppRole seeded; VAULT_ROLE_ID/SECRET_ID written to .env."
 echo "  Next: ./cv.sh up -d  - the db-manager will run the first-run install (DB seed,"
 echo "        Vault KV, and create the admin user '${CLIENT}_admin' for ${ADMIN_MAIL})."
 echo "        Watch it with: ./cv.sh logs -f cv3-backend-dbm"
-echo "  Vault unseal keys + root token are in $INIT - MOVE THEM OFFLINE and delete from the server."
+echo "  Vault unseal shares are in $INIT (root token revoked). MOVE THEM OFFLINE, split"
+echo "        custody, and delete the file - unseal_vault.sh --stdin does not need it."
 echo "  Re-unseal after any restart: ./scripts/unseal_vault.sh ; then ./cv.sh restart <backends>"

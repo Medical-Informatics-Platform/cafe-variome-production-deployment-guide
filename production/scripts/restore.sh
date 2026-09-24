@@ -10,17 +10,42 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$here"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
-ARCHIVE="${1:?usage: restore.sh <backups/TIMESTAMP.tar>}"
+ARCHIVE="${1:?usage: restore.sh <backups/TIMESTAMP.tar[.age|.gpg]>}"
 [ -f "$ARCHIVE" ] || { echo "ERROR: $ARCHIVE not found"; exit 1; }
 [ -f .env ] || { echo "ERROR: .env not found"; exit 1; }
 set -a; . ./.env; set +a
 PROJECT="$(basename "$here")"
 
+# Same pinned helper as backup.sh - never pull an unpinned image while a data volume
+# is mounted read-write.
+HELPER_IMAGE="$(grep -oE 'redis:[0-9.]+-alpine@sha256:[0-9a-f]{64}' compose.local-infra.yml | head -1)"
+[ -n "$HELPER_IMAGE" ] || { echo "ERROR: could not read the pinned helper image digest from compose.local-infra.yml."; exit 1; }
+
 read -r -p "This OVERWRITES current Mongo/Keycloak/Vault data. Type 'restore' to proceed: " ok
 [ "$ok" = "restore" ] || { echo "aborted"; exit 1; }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-tar xf "$ARCHIVE" -C "$TMP"; SRC="$TMP/$(ls "$TMP")"
+# TMPDIR under the repo (0700) rather than /tmp: the decrypted archive holds the Vault
+# unseal keys, and /tmp may be a shared world-traversable mount.
+mkdir -p "$here/.restore-tmp"; chmod 700 "$here/.restore-tmp"
+TMP="$(mktemp -d "$here/.restore-tmp/XXXXXX")"; chmod 700 "$TMP"
+trap 'rm -rf "$TMP"' EXIT
+
+# Accept the encrypted archives backup.sh can produce.
+case "$ARCHIVE" in
+  *.age)
+    command -v age >/dev/null || { echo "ERROR: $ARCHIVE is age-encrypted but 'age' is not installed."; exit 1; }
+    echo "== Decrypting $ARCHIVE (age) =="
+    age -d ${CV_BACKUP_AGE_IDENTITY:+-i "$CV_BACKUP_AGE_IDENTITY"} -o "$TMP/backup.tar" "$ARCHIVE"
+    tar xf "$TMP/backup.tar" -C "$TMP" && rm -f "$TMP/backup.tar" ;;
+  *.gpg)
+    command -v gpg >/dev/null || { echo "ERROR: $ARCHIVE is gpg-encrypted but 'gpg' is not installed."; exit 1; }
+    echo "== Decrypting $ARCHIVE (gpg) =="
+    gpg --batch --yes -o "$TMP/backup.tar" -d "$ARCHIVE"
+    tar xf "$TMP/backup.tar" -C "$TMP" && rm -f "$TMP/backup.tar" ;;
+  *)
+    tar xf "$ARCHIVE" -C "$TMP" ;;
+esac
+SRC="$TMP/$(ls "$TMP")"
 
 BACKENDS="cv3-backend-admin cv3-backend-query cv3-backend-network cv3-backend-query-meta cv3-backend-dbm cv3-backend-scheduler"
 
@@ -42,8 +67,9 @@ gunzip -c "$SRC/keycloak-pg.sql.gz" | docker exec -i cv3-keycloak-postgres sh -c
 
 echo "== Vault data restore (stop vault, replace volume contents, start) =="
 docker stop cv3-vault >/dev/null
-docker run --rm -v "${PROJECT}_cv_vault_data:/data" -v "$SRC:/backup:ro" \
-  alpine sh -c "rm -rf /data/* && tar xzf /backup/vault-data.tgz -C /data"
+docker run --rm --network none \
+  -v "${PROJECT}_cv_vault_data:/data" -v "$SRC:/backup:ro" \
+  --entrypoint sh "$HELPER_IMAGE" -c "rm -rf /data/* && tar xzf /backup/vault-data.tgz -C /data"
 docker start cv3-vault cv3-keycloak >/dev/null
 
 echo

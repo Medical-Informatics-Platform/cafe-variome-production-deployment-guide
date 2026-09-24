@@ -24,6 +24,31 @@
 	tls {$CV_TLS:admin@example.com}
 	encode zstd gzip
 
+	# Security response headers. Applied at the single TLS edge so every route gets
+	# them (SPA, APIs and Keycloak alike) without touching the upstream images.
+	header {
+		# HSTS: 1 year. Only meaningful on a real domain over public TLS; harmless on
+		# a `tls internal` test box because browsers ignore it for untrusted certs.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# The SPA is not meant to be framed; Keycloak's own login page sets its
+		# frame-ancestors CSP, and SAMEORIGIN keeps its iframe-based session checks
+		# (silent SSO via callback-silent.html) working.
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Drop browser access to hardware/APIs the app does not use.
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		# Do not advertise the server/framework.
+		-Server
+		-X-Powered-By
+	}
+
+	# NOTE: no Content-Security-Policy here on purpose. The CV3 SPA's inline/eval
+	# usage is not audited, and a wrong CSP breaks the app silently in the browser
+	# rather than failing loudly at deploy. Add one after testing the real bundle:
+	#   header Content-Security-Policy "default-src 'self'; ..."
+
 	# ACCESS LOG: one structured JSON line
 	# per request (timestamp, client IP, method, URI, status, user agent) to stdout
 	# -> the journald logging driver -> the host's persistent journal (1-year
