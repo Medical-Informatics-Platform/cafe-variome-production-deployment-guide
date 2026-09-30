@@ -46,4 +46,14 @@ for t in config/*.template; do
   chmod 0644 "$out"
   echo "rendered $out"
 done
+
+# The same applies to the committed files mounted read-only into containers that run
+# as a non-root uid (Vault 100; the CV3 backends read federation/). A copy made under
+# the CIS umask leaves them unreadable ("open /vault/config/vault.hcl: permission
+# denied", Vault crash-loops). None of them holds a secret.
+chmod 0755 vault federation
+find vault federation -type f -exec chmod 0644 {} +
+chmod 0644 Caddyfile.reverse-proxy caddy-start.sh squid.*.conf allowed_*.txt
+echo "made read-only mounts readable (vault/, federation/, proxy configs)"
+
 echo "Done. Review config/*.json (esp. backend_config.json - see config/README.md), then ./cv.sh up -d."

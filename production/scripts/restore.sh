@@ -10,6 +10,11 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$here"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+export PATH="$HOME/bin:$PATH"   # rootless Docker CLI location (install-docker-rootless.yml)
+[ -S "/run/user/$(id -u)/docker.sock" ] || {
+  echo "ERROR: no rootless Docker for user $(id -un). Run this as the Docker user: sudo -iu dockeruser" >&2
+  exit 1
+}
 ARCHIVE="${1:?usage: restore.sh <backups/TIMESTAMP.tar[.age|.gpg]>}"
 [ -f "$ARCHIVE" ] || { echo "ERROR: $ARCHIVE not found"; exit 1; }
 [ -f .env ] || { echo "ERROR: .env not found"; exit 1; }

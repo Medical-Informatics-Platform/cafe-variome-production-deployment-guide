@@ -14,6 +14,11 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$here"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+export PATH="$HOME/bin:$PATH"   # rootless Docker CLI location (install-docker-rootless.yml)
+[ -S "/run/user/$(id -u)/docker.sock" ] || {
+  echo "ERROR: no rootless Docker for user $(id -un). Run this as the Docker user: sudo -iu dockeruser" >&2
+  exit 1
+}
 
 [ -f .env ] || { echo "ERROR: .env not found (cp .env.template .env)"; exit 1; }
 set -a; . ./.env; set +a
@@ -40,7 +45,24 @@ vt() { docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN="$ROOT_TOK
 vready() { local rc; docker exec -e VAULT_ADDR=http://127.0.0.1:8200 cv3-vault vault status >/dev/null 2>&1; rc=$?; [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; }
 
 echo "== Vault: wait for API =="
-until vready; do echo "  waiting for cv3-vault API..."; sleep 2; done
+# Fail fast instead of waiting forever when step 1 (infra-only start) was skipped or failed.
+for c in cv3-vault cv3-mongo cv3-redis cv3-keycloak-postgres cv3-keycloak; do
+  [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ] || {
+    echo "ERROR: container $c is not running. Start the infra first:"
+    echo "  ./cv.sh up -d cv3-vault cv3-mongo cv3-redis cv3-keycloak-postgres cv3-keycloak"
+    exit 1
+  }
+done
+# wait_for <what> <tries> <sleep> <command...>
+wait_for() {
+  local what="$1" tries="$2" pause="$3"; shift 3
+  until "$@"; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || { echo "ERROR: $what did not become ready. Check: ./cv.sh logs $what"; exit 1; }
+    echo "  waiting for $what..."; sleep "$pause"
+  done
+}
+wait_for cv3-vault 60 2 vready
 
 if [ "$(vstatus | python3 -c 'import json,sys;print(json.load(sys.stdin)["initialized"])')" != "True" ]; then
   echo "== Vault: initialising (unseal keys + root token -> $INIT - MOVE OFFLINE) =="
@@ -126,15 +148,14 @@ echo "   AppRole secret_id TTL: ${VAULT_APPROLE_SECRET_ID_TTL:-2160h} - diarise 
 # itself - a unsealed Vault with the cv3 AppRole, and a Keycloak realm+client whose
 # service account it logs in as. On first start the db-manager's non_interactive_install
 # then does the actual app install (drops+seeds Mongo incl. the config docs, writes the
-# Vault KV secret, and creates the initial admin user in Keycloak+Mongo+Vault-transit
-# from KEYCLOAK_CLIENT_SECRET/ADMIN_EMAIL/ADMIN_AFFILIATION). So we deliberately do NOT
-# create the admin user / user.info / transit key here.
+# Vault KV secret, and registers the initial admin in Mongo + Vault transit from
+# KEYCLOAK_CLIENT_SECRET/ADMIN_EMAIL/ADMIN_AFFILIATION). The one exception is the admin's
+# Keycloak account, created below (see "initial admin").
 
 echo "== Keycloak: realm + client (+ service-account roles the db-manager needs) =="
 kc() { docker exec cv3-keycloak /opt/keycloak/bin/kcadm.sh "$@"; }
-until kc config credentials --server http://localhost:8080/auth --realm master --user "$KADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>&1; do
-  echo "  waiting for cv3-keycloak..."; sleep 3
-done
+kc_login() { kc config credentials --server http://localhost:8080/auth --realm master --user "$KADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>&1; }
+wait_for cv3-keycloak 100 3 kc_login
 kc get "realms/$REALM" >/dev/null 2>&1 || kc create realms -s "realm=$REALM" -s enabled=true >/dev/null
 CID="$(kc get clients -r "$REALM" -q clientId="$CLIENT" | sed -n 's/.*"id" : "\([^"]*\)".*/\1/p' | head -n1)"
 REDIR="[\"https://$CV_PUBLIC_HOST/callback.html\",\"https://$CV_PUBLIC_HOST/callback-silent.html\",\"https://$CV_PUBLIC_HOST/*\"]"
@@ -162,8 +183,8 @@ echo "== Keycloak: realm hardening (brute force, audit events, password policy) 
 #    (permanentLockout stays false - no self-inflicted DoS on shared accounts).
 #  - login + admin EVENT auditing, retained ~1 year in Keycloak's DB (eventsExpiration
 #    is seconds) - complements the host journal, which captures the containers' logs.
-#  - a minimum password policy; applies on next password (re)set, so the dbm-created
-#    temporary admin password still works and must be upgraded at first login.
+#  - a minimum password policy. Keycloak enforces it on user creation too, which is
+#    why the initial admin is created here (next section) and not by the db-manager.
 kc update "realms/$REALM" \
   -s bruteForceProtected=true -s failureFactor=10 \
   -s 'passwordPolicy=length(12) and notUsername' >/dev/null
@@ -171,6 +192,26 @@ kc update "events/config" -r "$REALM" \
   -s eventsEnabled=true -s eventsExpiration=31536000 \
   -s adminEventsEnabled=true -s adminEventsDetailsEnabled=true >/dev/null
 echo "   brute-force on, events on (1y), passwordPolicy=length(12)+notUsername"
+
+echo "== Keycloak: initial admin =="
+# The db-manager would create '<client>_admin' with the fixed password "cv_admin" and the
+# VERIFY_EMAIL action. Keycloak rejects that password under the policy above, and there
+# is no SMTP for the email step. So create the account here with a random temporary
+# password (changed at first login); the db-manager then finds it by email
+# ("Found existing user ... Continuing") and finishes the install.
+ADMIN_USER="${CLIENT}_admin"
+ADMIN_CRED="secrets/initial-admin.txt"
+if [ -n "$(kc get users -r "$REALM" -q username="$ADMIN_USER" -q exact=true --fields id | grep '"id"')" ]; then
+  echo "   $ADMIN_USER already exists (password unchanged; see $ADMIN_CRED if kept)."
+else
+  ADMIN_PASS="$(openssl rand -hex 12)"
+  kc create users -r "$REALM" -s username="$ADMIN_USER" -s email="$ADMIN_MAIL" \
+    -s emailVerified=true -s enabled=true -s firstName=Admin -s "lastName=Cafe Variome" \
+    -s 'requiredActions=["UPDATE_PASSWORD"]' >/dev/null
+  kc set-password -r "$REALM" --username "$ADMIN_USER" --new-password "$ADMIN_PASS" --temporary >/dev/null
+  ( umask 077; printf 'username=%s\ntemporary_password=%s\n' "$ADMIN_USER" "$ADMIN_PASS" > "$ADMIN_CRED" )
+  echo "   created $ADMIN_USER <$ADMIN_MAIL>; temporary password in $ADMIN_CRED"
+fi
 
 echo "== Mongo: app user with dbOwner (the db-manager's init_db drops + recreates the DB) =="
 mongo_root() { docker exec cv3-mongo mongosh --quiet -u "$MONGO_USER" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin cafevariome --eval "$1"; }
@@ -209,8 +250,10 @@ echo "DONE (prerequisites provisioned)."
 echo "  realm=$REALM client=$CLIENT  (service account: service-account-$CLIENT)"
 echo "  Vault AppRole seeded; VAULT_ROLE_ID/SECRET_ID written to .env."
 echo "  Next: ./cv.sh up -d  - the db-manager will run the first-run install (DB seed,"
-echo "        Vault KV, and create the admin user '${CLIENT}_admin' for ${ADMIN_MAIL})."
-echo "        Watch it with: ./cv.sh logs -f cv3-backend-dbm"
+echo "        Vault KV, and register the admin user '${CLIENT}_admin' for ${ADMIN_MAIL})."
+echo "        Its log says 'with password cv_admin': ignore that. The temporary password"
+echo "        is in $ADMIN_CRED (change it at first login, then delete the file)."
+echo "        Watch it with: ./cv.sh logs -f cv3-backend-database-manager"
 echo "  Vault unseal shares are in $INIT (root token revoked). MOVE THEM OFFLINE, split"
 echo "        custody, and delete the file - unseal_vault.sh --stdin does not need it."
 echo "  Re-unseal after any restart: ./scripts/unseal_vault.sh ; then ./cv.sh restart <backends>"

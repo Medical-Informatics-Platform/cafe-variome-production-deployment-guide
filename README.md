@@ -16,7 +16,7 @@ This guide helps to deploy Cafe Variome v3 (CV3) on a hardened Linux server with
 
 ## 1. Provision the host
 
-The host is hardened (CIS) and gets rootless Docker using the playbooks in [linux-server-management](https://github.com/NeuroTech-Platform/linux-server-management).
+The host is hardened (CIS) and gets rootless Docker using the playbooks in [linux-server-management](https://github.com/NeuroTech-Platform/linux-server-management) - commit ada5f3f0933ec08337c64cc335d6222cb8bad367 at the time of writing.
 
 ```bash
 git clone https://github.com/NeuroTech-Platform/linux-server-management.git
@@ -40,6 +40,12 @@ Harden the host. Connect as the server's initial user, for example `ubuntu` or `
 
 ```bash
 ansible-playbook -i inventories/production/inventory -l cafe-variome-node -u <initial-user> setup-playbook.yml
+```
+
+SSH once to change you password:
+
+```bash
+ssh cvadmin@IP
 ```
 
 Install rootless Docker. Connect as the admin user created in the previous step:

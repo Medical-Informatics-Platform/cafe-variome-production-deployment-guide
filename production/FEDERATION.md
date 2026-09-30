@@ -44,26 +44,27 @@ By default this deployment is an **isolated installation**. Setting `CV_FEDERATI
 3. For each other installation B:
 
    ```bash
-   ./scripts/federation_add_peer_client.sh cv3-b.example.org
+   ./scripts/federation_add_peer_client.sh cv3-b.example.org admin@hospital-b.example.org
    ```
 
-   The script prints the four values B needs. Send them to B's operator over a secure channel. Then:
+   The script creates B's client and B's initial admin account in this realm, and prints the values B needs and the admin's temporary password. Send them to B's operator over a secure channel. Then:
    - add B's hostname to `allowed_domains.federation.txt`, and run `./cv.sh restart cv-federation-proxy`;
    - add B's outbound IP to `CV_KC_ADMIN_PEERS` in `.env`, for example `"203.0.113.7/32"` (quoted), and run `./cv.sh up -d cv-proxy`. B's backends manage B's users through this realm's admin API. Every other client still gets 403.
 
 ## Set up each other installation (B)
 
-1. Before the first start, add the four values from A to `.env`:
+1. Before the first start, add the values from A to `.env`:
 
    ```bash
    CV_FEDERATION=1
    CV_KEYCLOAK_URL=https://cv3-a.example.org/auth/
    KC_CLIENT=cv3-cv3-b-example-org
    KEYCLOAK_CLIENT_SECRET=<from A>
+   ADMIN_EMAIL=<from A>
    ```
 
 2. Add A's hostname (and every other peer's) to `allowed_domains.federation.txt`.
-3. Deploy as in [README.md](README.md). `render-config.sh` points `Keycloak.URL` and `BackendURL` at A. The bootstrap still configures the local Keycloak, but CV3 does not use it. The initial admin is created in A's realm as `<KC_CLIENT>_admin`, with the temporary password `cv_admin`.
+3. Deploy as in [README.md](README.md). `render-config.sh` points `Keycloak.URL` and `BackendURL` at A. The bootstrap still configures the local Keycloak, but CV3 does not use it. B's initial admin is the account A created, `<KC_CLIENT>_admin`, with the temporary password A sent you. B's own `secrets/initial-admin.txt` refers to the unused local Keycloak.
 4. Set the advertised URL:
 
    ```bash

@@ -17,6 +17,10 @@ services:
     image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
     container_name: cv-proxy
     restart: always
+    # Adapts the Caddyfile and drops the ACME challenge bind_host that
+    # `default_bind tcp4/...` would otherwise break (see caddy-start.sh).
+    entrypoint: ["sh", "/etc/caddy/start.sh"]
+    command: []
     # Caddy is pinned to IPv4 TCP listeners via `default_bind tcp4/0.0.0.0` in the
     # Caddyfile so rootless pasta (--ipv4-only) forwards the published 80/443.
     read_only: true
@@ -32,7 +36,9 @@ services:
     # The sole public ingress had no healthcheck, so a Caddy that was running but not
     # serving (bad config, cert failure) still showed as "up". Probe the listener.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider --no-check-certificate https://127.0.0.1/ || wget -q --spider http://127.0.0.1/ || exit 1"]
+      # Caddy's local admin endpoint. HTTPS to 127.0.0.1 has no certificate (no SNI) and
+      # HTTP only redirects to it, so probing the site itself always reported unhealthy.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -60,6 +66,7 @@ services:
       no_proxy: localhost,127.0.0.1,::1,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-keycloak
     volumes:
       - ./Caddyfile.reverse-proxy:/etc/caddy/Caddyfile:ro
+      - ./caddy-start.sh:/etc/caddy/start.sh:ro
       - cv_caddy_data:/data
       - cv_caddy_config:/config
     networks:
