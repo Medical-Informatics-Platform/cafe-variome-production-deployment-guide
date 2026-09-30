@@ -38,7 +38,8 @@ services:
     healthcheck:
       # Caddy's local admin endpoint. HTTPS to 127.0.0.1 has no certificate (no SNI) and
       # HTTP only redirects to it, so probing the site itself always reported unhealthy.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      # -Y off: BusyBox wget ignores NO_PROXY and would send this to cv-tls-egress-proxy.
+      test: ["CMD-SHELL", "wget -Y off -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
