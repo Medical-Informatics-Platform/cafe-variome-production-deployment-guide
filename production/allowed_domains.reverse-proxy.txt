@@ -1,0 +1,12 @@
+# Egress allowlist for cv-tls-egress-proxy (Caddy's ACME client only).
+# A leading dot matches all subdomains. One host per line.
+
+# Let's Encrypt (production + staging) and its OCSP/CRL hosts.
+acme-v02.api.letsencrypt.org
+acme-staging-v02.api.letsencrypt.org
+.lencr.org
+
+# DNS-01 only: if you switch Caddy to a DNS challenge, also allowlist your DNS
+# provider's API host, e.g.:
+# api.cloudflare.com
+# api.digitalocean.com

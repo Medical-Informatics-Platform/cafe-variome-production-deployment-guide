@@ -1,0 +1,7 @@
+# Private address ranges that federation peers may use (CV_FEDERATION=1).
+# By default cv-federation-proxy blocks private, loopback and link-local addresses.
+# List a peer's address here only if it is on a private network (e.g. an intranet);
+# its hostname must also be in allowed_domains.federation.txt. One CIDR per line.
+# Apply changes with: ./cv.sh restart cv-federation-proxy
+#
+# 10.20.30.40/32

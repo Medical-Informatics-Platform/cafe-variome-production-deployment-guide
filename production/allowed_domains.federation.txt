@@ -1,0 +1,7 @@
+# Federation egress allowlist for cv-federation-proxy (CV_FEDERATION=1).
+# One hostname per line; a leading dot matches all subdomains.
+# List every peer installation's public hostname (the host part of its base URL),
+# and the shared Keycloak host if you use CV_KEYCLOAK_URL. Do not list your own host.
+# Apply changes with: ./cv.sh restart cv-federation-proxy
+#
+# cv3-peer.example.org

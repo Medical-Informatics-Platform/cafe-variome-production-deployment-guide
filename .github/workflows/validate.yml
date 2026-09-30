@@ -1,0 +1,172 @@
+# Static validation for the production deployment layer.
+#
+# Why this exists: SECURITY.md leans on the image pins and on validate-env.sh, and
+# Renovate opens digest-bump PRs automatically. Without CI, nothing checked a bump
+# before a human merged it, and renovate.json's `helpers:pinGitHubActionDigests` +
+# `github-actions` rule had no workflows to act on. This closes both.
+#
+# It is deliberately static: no daemon, no secrets, no deploy. It proves the compose
+# set still merges in BOTH infra modes, every image is digest-pinned, and the scripts
+# parse. A live deploy test stays a manual step (see production/README.md § Verify).
+
+name: validate
+
+on:
+  push:
+    branches: ["main", "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    name: compose merges + pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Synthesise a throwaway .env
+        # Values are dummies that satisfy validate-env.sh's shape checks (hex, long
+        # enough, no placeholder substrings). Nothing here is a real secret.
+        working-directory: production
+        run: |
+          cat > .env <<'EOF'
+          CV_LOCAL_INFRA=1
+          CV_PUBLIC_HOST=cv3.ci.invalid
+          ACME_EMAIL=ci@cv3.ci.invalid
+          VAULT_ROLE_ID=00112233445566778899aabbccddeeff
+          VAULT_SECRET_ID=ffeeddccbbaa99887766554433221100
+          KEYCLOAK_CLIENT_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef
+          ADMIN_EMAIL=ci@cv3.ci.invalid
+          ADMIN_AFFILIATION=CI
+          KEYCLOAK_ADMIN=admin
+          KEYCLOAK_ADMIN_PASSWORD=0123456789abcdef0123456789abcdef
+          KC_DB_USERNAME=keycloak
+          KC_DB_PASSWORD=0123456789abcdef0123456789abcdef
+          MONGO_ROOT_USERNAME=cv3root
+          MONGO_ROOT_PASSWORD=0123456789abcdef0123456789abcdef
+          MONGO_APP_USERNAME=cv3app
+          MONGO_APP_PASSWORD=fedcba9876543210fedcba9876543210
+          EOF
+          chmod 600 .env
+
+      - name: Merge - local-infra mode (+ reverse proxy)
+        working-directory: production
+        run: |
+          docker compose --env-file .env \
+            -f docker-compose.yml -f compose.hardening.yml \
+            -f compose.local-infra.yml -f compose.reverse-proxy.yml \
+            config > /tmp/local.yml
+          echo "services: $(grep -cE '^  [a-z0-9-]+:' /tmp/local.yml)"
+
+      - name: Merge - external-infra mode (+ reverse proxy)
+        working-directory: production
+        run: |
+          docker compose --env-file .env \
+            -f docker-compose.yml -f compose.hardening.yml \
+            -f compose.egress.yml -f compose.reverse-proxy.yml \
+            config > /tmp/ext.yml
+
+      - name: Merge - federation (local infra + shared Keycloak, and external infra)
+        working-directory: production
+        run: |
+          docker compose --env-file .env \
+            -f docker-compose.yml -f compose.hardening.yml \
+            -f compose.local-infra.yml -f compose.reverse-proxy.yml \
+            -f compose.federation.yml -f compose.shared-keycloak.yml \
+            config > /tmp/fed.yml
+          docker compose --env-file .env \
+            -f docker-compose.yml -f compose.hardening.yml \
+            -f compose.egress.yml -f compose.reverse-proxy.yml \
+            -f compose.federation.yml \
+            config > /tmp/fed-ext.yml
+
+      - name: Every image must be digest-pinned
+        # The guarantee SECURITY.md § 5 makes. A Renovate PR that introduces a bare
+        # tag, or a hand edit that drops a digest, fails here instead of shipping.
+        run: |
+          fail=0
+          for f in /tmp/local.yml /tmp/ext.yml /tmp/fed.yml /tmp/fed-ext.yml; do
+            while read -r img; do
+              case "$img" in
+                *@sha256:*) ;;
+                "") ;;
+                *) echo "::error::unpinned image in $f: $img"; fail=1 ;;
+              esac
+            done < <(grep -oE '^[[:space:]]*image: .*' "$f" | sed 's/.*image: //')
+          done
+          # The backup/restore helper image is resolved from the compose file at
+          # runtime; make sure that lookup still finds a digest-pinned entry.
+          grep -qE 'redis:[0-9.]+-alpine@sha256:[0-9a-f]{64}' production/compose.local-infra.yml \
+            || { echo "::error::backup.sh/restore.sh can no longer resolve a pinned helper image"; fail=1; }
+          exit $fail
+
+      - name: No published ports outside the reverse proxy
+        # docker-compose.yml must never regain the upstream 5000/5100/5200/5080
+        # publishes; only cv-proxy may expose 80/443.
+        run: |
+          if grep -nE '^[[:space:]]*(ports|expose):' production/docker-compose.yml; then
+            echo "::error::docker-compose.yml must not publish ports (reverse proxy is the sole ingress)"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import re, sys
+          t = open('/tmp/local.yml').read() + open('/tmp/fed.yml').read()
+          pub = re.findall(r'published: "?(\d+)"?', t)
+          allowed = {"80", "443"}
+          bad = sorted(set(pub) - allowed)
+          if bad:
+              print(f"::error::unexpected published ports: {bad}")
+              sys.exit(1)
+          print(f"published ports: {sorted(set(pub))}")
+          PY
+
+  scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (parse)
+        run: |
+          fail=0
+          for f in production/cv.sh production/scripts/*.sh dev/scripts/*.sh; do
+            bash -n "$f" || { echo "::error file=$f::syntax error"; fail=1; }
+          done
+          exit $fail
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # Warnings are advisory for now; errors fail the build.
+          shellcheck -S error production/cv.sh production/scripts/*.sh
+          shellcheck -S warning production/cv.sh production/scripts/*.sh || true
+
+      - name: validate-env.sh rejects placeholders and does not execute .env
+        run: |
+          cd production
+          # 1. a placeholder must fail the gate
+          cat > /tmp/bad.env <<'EOF'
+          VAULT_ROLE_ID=CHANGE_ME_now
+          VAULT_SECRET_ID=x
+          KEYCLOAK_CLIENT_SECRET=x
+          ADMIN_EMAIL=a@b.ch
+          ADMIN_AFFILIATION=CI
+          CV_LOCAL_INFRA=1
+          KEYCLOAK_ADMIN_PASSWORD=x
+          KC_DB_PASSWORD=x
+          MONGO_ROOT_PASSWORD=x
+          MONGO_APP_PASSWORD=x
+          EOF
+          if ./scripts/validate-env.sh /tmp/bad.env; then
+            echo "::error::validate-env.sh accepted a placeholder"; exit 1
+          fi
+          # 2. .env must be parsed, never sourced
+          printf 'VAULT_ROLE_ID=a\nVAULT_SECRET_ID=$(touch /tmp/PWNED)\n' > /tmp/evil.env
+          ./scripts/validate-env.sh /tmp/evil.env >/dev/null 2>&1 || true
+          if [ -e /tmp/PWNED ]; then
+            echo "::error::validate-env.sh executed code from .env"; exit 1
+          fi
+          echo "gate behaves correctly"

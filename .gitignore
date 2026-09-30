@@ -1,0 +1,19 @@
+.DS_Store
+work_dir/
+
+# CV3 production deployment - secrets and rendered (host-specific) config
+production/.env
+production/config/*.json
+production/secrets/
+production/backups/
+*.unseal
+
+production/.restore-tmp/
+
+# Real (host-specific) ansible inventory - keep locally next to the committed
+# *.example files for manual A-Z passes; never commit (contains IP + credentials).
+production/inventory/inventory
+production/inventory/host_vars/cafe-variome-node/vars.yml
+
+# Federation: private CA certificates for peers (host-specific)
+production/federation/extra-ca.pem

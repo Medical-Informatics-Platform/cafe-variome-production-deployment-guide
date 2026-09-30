@@ -1,0 +1,56 @@
+---
+# Host vars for the CV3 node - copy to host_vars/cafe-variome-node/vars.yml in your
+# linux-server-management clone and replace the SSH key + password. This is the FULL
+# set the setup-playbook actually requires (the upstream README's short example omits
+# several and the play then fails its var assertions / a logind reference).
+
+# --- Users ---
+MANAGE_USERS: true
+SSH_USERLIST:
+  - username: cvadmin
+    admin: true
+    public_key: "ssh-ed25519 AAAA...REPLACE_WITH_YOUR_PUBLIC_KEY"
+    initialpassword: "REPLACE_with_a_strong_password"
+
+# --- Required by setup-playbook's pre-flight assertions ---
+ENABLE_2FA: false                       # true => SSH needs TOTP (interactive); keep false for automation
+AUDITD_ACTION_MAIL_ACCT: root
+AUTO_UPDATES_OPTIONS:
+  enabled: true
+  only_security: true
+  reboot: false                         # avoid surprise reboots; flip on if you want auto-reboot
+
+# --- Required by the hardening role (no default in the playbook) ---
+LOGIND_HARDENING:
+  killuserprocesses: true
+  killexcludeusers: ["root"]
+  idleaction: "lock"
+  idleactionsec: "15min"
+  removeipc: true
+
+# --- SSH / hardening ---
+DISABLE_ROOT_ACCOUNT: true
+MANAGE_SSH: true
+SSHD_ADMIN_NET:
+  - "0.0.0.0/0"                          # tighten to your management IP/CIDR
+
+# --- Firewall ---
+MANAGE_UFW: true
+UFW_OUTGOING_TRAFFIC:
+  - { "port": 22, "proto": "tcp" }
+  - 53
+  - { "port": 80, "proto": "tcp" }
+  - { "port": 443, "proto": "tcp" }
+  - { "port": 123, "proto": "udp" }
+
+# The hardening UFW pass DELETES any inbound rule it doesn't manage, so re-open the
+# CV3 ingress ports here (POST_RUN_EXTRA_COMMANDS runs AFTER the hardening role, so a
+# re-run self-heals). 80/443 = the Caddy TLS reverse proxy. CV3 service ports are
+# never published.
+POST_RUN_EXTRA_COMMANDS: |
+  ufw allow 80/tcp
+  ufw allow 443/tcp
+
+# --- Docker (rootless) ---
+DOCKER_USER: "dockeruser"
+DOCKER_COMPOSE: true

@@ -1,0 +1,75 @@
+# Federation overlay (cv.sh adds this when CV_FEDERATION=1). See FEDERATION.md.
+#
+# Lets cv3-backend-network reach peer installations, and cv3-backend-query-meta reach
+# Beacon sources, through a dedicated allowlisting Squid. CV3's aiohttp client ignores
+# HTTP(S)_PROXY by default; federation/sitecustomize.py (mounted read-only, first on
+# PYTHONPATH) makes it honour the proxy, so this egress stays filtered.
+# Loaded after compose.egress.yml, so these HTTP(S)_PROXY values win for the two
+# services below; cv-federation-proxy also allows allowed_domains.cv-egress.txt.
+
+x-federation-client: &federation_client
+  environment:
+    PYTHONPATH: /opt/cv3-fed:/app
+    HTTP_PROXY: http://cv-federation-proxy:3128
+    HTTPS_PROXY: http://cv-federation-proxy:3128
+    http_proxy: http://cv-federation-proxy:3128
+    https_proxy: http://cv-federation-proxy:3128
+    # In-stack names and our own public host (reached via cv-proxy's alias) stay direct.
+    NO_PROXY: &no_proxy localhost,127.0.0.1,::1,cv-proxy,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-vault,cv3-keycloak,cv3-mongo,cv3-redis,${CV_PUBLIC_HOST:?federation needs CV_PUBLIC_HOST}
+    no_proxy: *no_proxy
+  volumes:
+    - ./federation:/opt/cv3-fed:ro
+  networks: [cv_federation]
+  depends_on:
+    cv-federation-proxy:
+      condition: service_healthy
+
+services:
+  cv-federation-proxy:
+    image: ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    container_name: cv-federation-proxy
+    restart: always
+    # Foreground (-N); the image default daemonizes and the container would exit.
+    command: ["-f", "/etc/squid/squid.conf", "-NYC"]
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]  # squid drops to the proxy user
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 200
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+    mem_limit: "256m"
+    cpus: "0.5"
+    tmpfs:
+      - "/var/spool/squid:rw,size=64m,uid=13,gid=13,mode=0775"
+      - "/var/log/squid:rw,size=16m,uid=13,gid=13,mode=0775"
+      - "/run:size=16m"
+    volumes:
+      - ./squid.federation.conf:/etc/squid/squid.conf:ro
+      - ./allowed_domains.federation.txt:/etc/squid/allowed_domains.federation.txt:ro
+      - ./allowed_networks.federation.txt:/etc/squid/allowed_networks.federation.txt:ro
+      - ./allowed_domains.cv-egress.txt:/etc/squid/allowed_domains.cv-egress.txt:ro
+    networks:
+      cv_federation: {}
+      wan: {}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/3128'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: journald
+      options: { tag: "{{.Name}}" }
+
+  cv3-backend-network:
+    <<: *federation_client
+
+  cv3-backend-query-meta:
+    <<: *federation_client
+
+networks:
+  cv_federation:
+    internal: true
+  wan:
+    driver: bridge
