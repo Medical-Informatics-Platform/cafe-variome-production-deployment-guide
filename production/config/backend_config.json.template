@@ -21,7 +21,11 @@
     "BackendURL": "__KC_BACKEND_URL__",
     "RedirectURLs": [
       "https://__CV_PUBLIC_HOST__/callback.html",
-      "https://__CV_PUBLIC_HOST__/callback-silent.html"
+      "https://__CV_PUBLIC_HOST__/callback-silent.html",
+      "https://__CV_PUBLIC_HOST__/discover/callback.html",
+      "https://__CV_PUBLIC_HOST__/discover/callback-silent.html",
+      "https://__CV_PUBLIC_HOST__/meta-discover/callback.html",
+      "https://__CV_PUBLIC_HOST__/meta-discover/callback-silent.html"
     ]
   },
   "Vault": {

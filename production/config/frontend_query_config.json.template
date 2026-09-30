@@ -1,7 +1,7 @@
 {
   "backendUrl": "https://__CV_PUBLIC_HOST__/query",
-  "redirectUrl": "https://__CV_PUBLIC_HOST__/callback.html",
-  "redirectSilentUrl": "https://__CV_PUBLIC_HOST__/callback-silent.html",
+  "redirectUrl": "https://__CV_PUBLIC_HOST__/discover/callback.html",
+  "redirectSilentUrl": "https://__CV_PUBLIC_HOST__/discover/callback-silent.html",
   "adminUrl": "https://__CV_PUBLIC_HOST__",
   "discoverUrl": "https://__CV_PUBLIC_HOST__/discover",
   "metaDiscoverUrl": "https://__CV_PUBLIC_HOST__/meta-discover"
