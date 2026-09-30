@@ -8,7 +8,7 @@ This deployment relies on four layers of protection: a hardened host, rootless D
   - SSH login by key only, restricted to an admin network.
   - Root account disabled.
   - auditd enabled.
-  - UFW denies by default. Only 80/443 are open inbound, and outbound is limited to a short list.
+  - UFW denies by default. Inbound: 80/443, plus SSH from `SSHD_ADMIN_NET` (the example allows `0.0.0.0/0` until you narrow it). Outbound is limited to a short list.
 - **Rootless Docker** (`install-docker-rootless.yml`). The Docker daemon and all containers run as `dockeruser`.
   - Root inside a container maps to `dockeruser` on the host, not to host root.
   - A container breakout therefore reaches `dockeruser`. That user owns every volume, `.env` and the rendered config.
@@ -25,7 +25,7 @@ The app services share one hardening block. The infra and proxy services set the
   - frontend nginx and Caddy get `NET_BIND_SERVICE`;
   - MongoDB and the active egress Squid get `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` to drop privileges at startup. Only one of the two egress Squids runs at a time.
 - **`no-new-privileges:true`.**
-- **Limits per service:** `pids_limit`, `ulimits.nofile`, `mem_limit` and `cpus`.
+- **Limits per service:** `pids_limit`, `ulimits.nofile`, `mem_limit` and `cpus`. Only `ulimits.nofile` is enforced under rootless Docker; the others document intent (see §7).
 - **Non-root users** where the image allows it: Vault `100`, Keycloak Postgres `70`, Redis `999`, nginx `101`, CV3 backends `appuser` (`100`).
 - **Config and secrets.** Config is mounted read-only. Each container receives only the secrets it needs, through `environment:`. There is no shared `env_file`.
 
@@ -41,7 +41,7 @@ Three networks are marked `internal: true`. Docker gives them no default route a
 
 **Egress.** Backends reach the internet only through a Squid proxy. Its allowlist denies by default and also blocks loopback, RFC1918, link-local addresses (including `169.254.169.254`) and the stack's own subnets.
 
-**Ingress.** Caddy (`cv-proxy`) terminates TLS and is the only public entry point. Its ACME client goes out through a second Squid that allows only Let's Encrypt endpoints. `cv-proxy` is also attached to a routed network, `cv_ingress`; see §7.
+**Ingress.** Caddy (`cv-proxy`) terminates TLS and is the only public entry point. It holds the TLS key and sees all traffic in plaintext. Its ACME client goes out through a second Squid that allows only Let's Encrypt endpoints. `cv-proxy` is also attached to a routed network, `cv_ingress`; see §7.
 
 ## 4. Secrets and identity
 
@@ -63,9 +63,9 @@ Three networks are marked `internal: true`. Docker gives them no default route a
   - a MongoDB password is not alphanumeric;
   - external-infra mode is used but the egress allowlist is empty.
 
-  It also warns about short secrets and sets `.env` to mode `0600`.
+  It also warns about short secrets and sets `.env` to mode `0600`. Limits: starting named services only prints a warning (needed for the bootstrap), and `CV_SKIP_ENV_CHECK=1` skips the check entirely.
 - **Never committed** (gitignored): `.env`, `config/*.json` (they contain the MongoDB password), `secrets/`, `backups/`.
-- **Backups** contain the unseal shares, both database dumps and `.env`. Set an age or GPG recipient so `backup.sh` encrypts them, and keep the decryption key off this host.
+- **Backups** contain the unseal shares, both database dumps and `.env`. They are plaintext unless you set an age or GPG recipient; keep the decryption key off this host. Nothing here schedules backups or copies them off the host.
 
 ## 5. Image supply chain
 
@@ -88,14 +88,16 @@ Access and audit logs must survive redeploys and reboots, and are kept for 1 yea
 
 ## 7. Residual risks
 
-| Risk | Mitigation |
+None of the fixes in the right-hand column are implemented in this repo.
+
+| Risk | Mitigation suggested |
 |---|---|
 | DNS is not filtered. Docker's resolver answers on internal networks, so a compromised container has a low-bandwidth DNS side channel. | Pin the resolver, and log and alert on query volume. |
-| `cv-proxy` has a route out. Rootless `pasta` cannot forward ports to a container that is only on internal networks, so it also joins `cv_ingress`. Its egress is limited only by `HTTP(S)_PROXY`, which a compromised process can ignore. Caddy binds `tcp4/0.0.0.0` because pasta forwards IPv4 only. | None in place. |
+| `cv-proxy` has a route out. Rootless `pasta` cannot forward ports to a container that is only on internal networks, so it also joins `cv_ingress`. Its egress is limited only by `HTTP(S)_PROXY`, which a compromised process can ignore. Caddy binds `tcp4/0.0.0.0` because pasta forwards IPv4 only. | No fix proposed yet. |
 | Resource limits are not enforced by the kernel. Rootless Docker uses cgroup driver `none`, so `mem_limit`, `cpus` and `pids_limit` have no effect. `ulimits.nofile`, tmpfs sizes and journald caps are enforced. Check the driver with `docker info -f '{{.CgroupDriver}}'`. | Plan host capacity. |
 | No isolation between containers on the same network. The host has no `br_netfilter` (`deploy/br-netfilter.conf`), so inter-container restrictions are skipped. On `cv_egress`, Vault, MongoDB and Redis traffic is plaintext, and Redis has no authentication. | Restore ICC restrictions, or add Redis authentication and TLS on that network. |
 | Keycloak's root filesystem is writable, because `start --optimized=false` builds at boot. | Build a pre-optimised image and set `read_only`, or use your organisation's managed Keycloak. |
 | All 5 unseal shares are stored in one file, so the 3-of-5 threshold does not separate custodians. | Hand the shares to separate people and use `unseal_vault.sh --stdin`, or use your organisation's managed Vault. |
 | No monitoring or alerting. Metrics and log shipping are disabled in `backend_config.json.template`. | Add external monitoring. |
-| No rate limiting at the proxy and no CSP. Security headers are set, but the SPA's inline and eval usage has not been audited. | None in place. |
+| No rate limiting at the proxy and no CSP. Security headers are set, but the SPA's inline and eval usage has not been audited. | No fix proposed yet. |
 | With `CV_TLS=internal` the certificate is self-signed. | Use a real domain and Let's Encrypt in production. |

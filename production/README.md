@@ -1,6 +1,6 @@
 # CV3 production deployment
 
-Runs Cafe Variome v3 with rootless Docker on a host provisioned as described in [../README.md](../README.md). The security controls and their trade-offs are described in [SECURITY.md](SECURITY.md).
+Runs Cafe Variome v3 with rootless Docker on a host provisioned as described in [../README.md](../README.md). The security controls and their trade-offs are described in [SECURITY.md](SECURITY.md). Read this document fully once before starting the work.
 
 Run every command in this directory through `./cv.sh`. It is a wrapper around `docker compose` that chooses the compose overlays from `.env`.
 
@@ -123,7 +123,7 @@ Vault starts sealed after every host or Vault restart. Unseal it, then restart t
 CV_UNSEAL_KEYS="$(pass cv3/unseal)" ./scripts/unseal_vault.sh   # or read them from a secret manager
 ```
 
-If neither is given, the script reads `secrets/vault-init.json` and prints a warning.
+If neither is given, the script reads `secrets/vault-init.json` and prints a warning. Note that **the host restarts during the night to apply security updates** and this is one of the reasons why you should use an organinisation managed Vault rather than the one here. The full stack allows you to have a "staging" instance but favor your organisation's keyvault.
 
 ### Backup
 
@@ -133,7 +133,7 @@ Local infra only. In external-infra mode, your managed services handle their own
 ./scripts/backup.sh
 ```
 
-This writes one tarball under `backups/`. It contains the Mongo dump, the Keycloak Postgres dump, Vault data, `.env`, `secrets/` and the rendered config. If `CV_BACKUP_AGE_RECIPIENT` or `CV_BACKUP_GPG_RECIPIENT` is set, the tarball is encrypted and the plaintext copy is deleted. Nothing in this repo schedules backups or copies them off the host; set that up yourself, for example with a cron job for `dockeruser`.
+This writes one tarball under `backups/`. It contains the Mongo dump, the Keycloak Postgres dump, Vault data, `.env`, `secrets/` and the rendered config. If `CV_BACKUP_AGE_RECIPIENT` or `CV_BACKUP_GPG_RECIPIENT` is set, the tarball is encrypted and the plaintext copy is deleted. Nothing in this repo schedules backups or copies them off the host; set that up yourself, for example with a cron job for `dockeruser`. Ideally, however, you would work in a "pull" manner so that compromission of this host does not give the keys to your backups.
 
 ### Restore
 
