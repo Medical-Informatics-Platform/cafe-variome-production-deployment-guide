@@ -1,61 +1,45 @@
-# CV3 - local dev / staging
+# CV3 local dev VM
 
-A throwaway local quick-start for **developers**: a Debian VM running CV3 in **dev mode**
-with direct host ports and convenience bootstrap scripts. It is the fast inner-loop for
-trying the stack out - it is **not** a deployment target.
+A disposable Debian VM that runs CV3 in dev mode, for trying the stack locally.
 
-> ⚠️ **Not hardened. Do not expose.** This path deliberately trades security for speed:
-> Vault runs in **dev mode with a hardcoded root token**, Keycloak uses a default admin
-> (`admin`/`adminadmin`), services are published on plain `http://127.0.0.1` ports, and
-> there is no TLS. For anything reachable by others - including a shared staging server —
-> use the hardened layer in [`../production/`](../production/) (see
-> [../production/README.md](../production/README.md) and
-> [../production/SECURITY.md](../production/SECURITY.md)).
+> **Not secure. Never expose it.** Vault runs in dev mode with a hardcoded root token, the Keycloak admin is `admin`/`adminadmin`, services listen on plain HTTP on `127.0.0.1`, and there is no TLS. For any machine other people can reach, use [`../production/`](../production/).
+
+This setup is separate from `production/`: it uses a different layout (`~/cv3-deploy`), different bootstrap scripts, and no reverse proxy.
 
 ## Contents
 
 | Path | Purpose |
 |---|---|
 | `Vagrantfiles/vagrant-debian13-amd64/` | Debian 13 VM (qemu, x86_64) |
-| `Vagrantfiles/vagrant-debian13-arm64/` | Debian 13 VM (qemu, arm64 - Apple Silicon) |
-| `scripts/bootstrap_cv3_vault.sh` | dev Vault: enable AppRole/KV/transit, seed dev secrets, write `VAULT_ROLE_ID/SECRET_ID` to `~/cv3-deploy/.env` |
-| `scripts/bootstrap_cv3_identity.sh` | dev Keycloak realm/client + initial user, Mongo seed |
-| `scripts/update_keycloak_client.sh` | point the `test_client` redirect/web-origins at `http://127.0.0.1:5080` |
-| `scripts/fix_cv3_direct_access_config.sh` | rewrite the frontend/backend config for direct `127.0.0.1` port access (5000/5100/5200/5080) |
-| `scripts/run_cv3_bootstrap_from_host.sh` | convenience: `vagrant up`, upload+run the four scripts, restart CV3 |
+| `Vagrantfiles/vagrant-debian13-arm64/` | Debian 13 VM (qemu, arm64 / Apple Silicon) |
+| `scripts/bootstrap_cv3_vault.sh` | Sets up dev Vault (AppRole, KV, transit, dev secrets) and writes `VAULT_ROLE_ID`/`VAULT_SECRET_ID` to `~/cv3-deploy/.env` |
+| `scripts/bootstrap_cv3_identity.sh` | Creates the Keycloak realm, client and initial user; seeds MongoDB |
+| `scripts/update_keycloak_client.sh` | Points the `test_client` redirect URIs and web origins at `http://127.0.0.1:5080` |
+| `scripts/fix_cv3_direct_access_config.sh` | Rewrites the config for direct port access (5000/5100/5200/5080) |
+| `scripts/run_cv3_bootstrap_from_host.sh` | From the host: runs `vagrant up`, then uploads and runs the four scripts above, then restarts CV3 |
 
 ## Quick start
 
-1. **Boot the VM** (needs Vagrant + the qemu provider on the host):
+1. Boot the VM. Requires Vagrant with the qemu provider.
 
    ```bash
-   cd Vagrantfiles/vagrant-debian13-amd64   # or -arm64 on Apple Silicon
+   cd Vagrantfiles/vagrant-debian13-amd64   # use -arm64 on Apple Silicon
    vagrant up
    vagrant ssh
    ```
 
-2. **Inside the VM**, install Docker and deploy CV3 to `~/cv3-deploy` - use the upstream
-   provided docker compose from CV3 team (it expects `~/cv3-deploy/{docker-compose.yml,.env,config/}`), then `docker compose up -d`.
+2. Inside the VM, install Docker. Put the CV3 team's upstream `docker-compose.yml`, `.env` and `config/` in `~/cv3-deploy`, then run `docker compose up -d`.
 
-3. **Bootstrap** (the scripts assume `~/cv3-deploy` exists and the containers are up):
+3. Bootstrap:
 
    ```bash
-   bash bootstrap_cv3_vault.sh          # writes VAULT_ROLE_ID/SECRET_ID into ~/cv3-deploy/.env
+   bash bootstrap_cv3_vault.sh
    bash bootstrap_cv3_identity.sh
-   bash fix_cv3_direct_access_config.sh # direct-port (127.0.0.1) frontend/backend config
+   bash fix_cv3_direct_access_config.sh
    bash update_keycloak_client.sh
    cd ~/cv3-deploy && docker compose up -d
    ```
 
-   From the host, `scripts/run_cv3_bootstrap_from_host.sh` automates steps 1+3 (run it from a
-   directory that contains a `Vagrantfile`).
+   `scripts/run_cv3_bootstrap_from_host.sh` does steps 1 and 3 for you. Run it from a directory that contains a `Vagrantfile`.
 
-4. **Open** `http://127.0.0.1:5080/`.
-
-## Relationship to production
-
-This dev flow and the hardened [`../production/`](../production/) layer are independent:
-different layout (`~/cv3-deploy` vs the `production/` overlays), different Vault/Keycloak
-posture (dev vs non-dev + service-account), different access (direct ports vs TLS reverse
-proxy). The production bootstrap (`production/scripts/bootstrap_local_infra.sh`) is adapted
-from these scripts but for a real non-dev Vault and production credentials.
+4. Open `http://127.0.0.1:5080/`.

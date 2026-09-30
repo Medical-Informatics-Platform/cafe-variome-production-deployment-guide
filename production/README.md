@@ -1,157 +1,183 @@
-# CV3 - hardened production deployment layer
+# CV3 production deployment
 
-This directory deploys Cafe Variome v3 on a **CIS-hardened, rootless-Docker** host with per-container least privilege, network segmentation, forced egress, a TLS reverse proxy, and digest-pinned images. For the *why* behind every control and the documented trade-offs, see [SECURITY.md](SECURITY.md).
+Runs Cafe Variome v3 with rootless Docker on a host provisioned as described in [../README.md](../README.md). The security controls and their trade-offs are described in [SECURITY.md](SECURITY.md).
 
-> The top-level [../README.md](../README.md) covers the original manual flow. **This layer supersedes it** for hardened deployments - drive everything through `./cv.sh`.
+Run every command in this directory through `./cv.sh`. It is a wrapper around `docker compose` that chooses the compose overlays from `.env`.
 
 ## Layout
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
-| `docker-compose.yml` | the 7 CV3 app containers (digest-pinned, no host ports) |
-| `compose.hardening.yml` | per-container hardening overlay (read-only, caps, tmpfs, uids) |
-| `compose.local-infra.yml` | optional self-contained Keycloak + Vault + MongoDB + Redis |
-| `compose.egress.yml` | forced-egress Squid for **external** infra mode |
-| `compose.reverse-proxy.yml` | Caddy TLS ingress + ACME-only egress Squid |
-| `cv.sh` | wrapper that stacks the right overlays (reads toggles from `.env`) |
-| `Caddyfile.reverse-proxy`, `squid.*.conf`, `allowed_domains.*.txt` | proxy policy |
-| `vault/vault.hcl` | non-dev Vault config (file storage, persistent) |
-| `config/*.template` | config rendered to `config/*.json` by `scripts/render-config.sh` |
-| `deploy/*.conf` | host drop-ins applied by `scripts/apply-host-tuning.sh` |
-| `scripts/` | bootstrap, render, validate, unseal, backup/restore, host-tuning |
+| `docker-compose.yml` | The 7 CV3 app containers. Images are pinned by digest; no host ports are published. |
+| `compose.hardening.yml` | Per-container hardening: read-only root filesystem, dropped capabilities, tmpfs, non-root uids. |
+| `compose.local-infra.yml` | Keycloak, Vault, MongoDB and Redis, for local-infra mode. |
+| `compose.egress.yml` | Squid egress proxy, for external-infra mode. |
+| `compose.reverse-proxy.yml` | Caddy TLS reverse proxy, plus a Squid that allows only ACME traffic. |
+| `cv.sh` | `docker compose` wrapper. |
+| `Caddyfile.reverse-proxy`, `squid.*.conf`, `allowed_domains.*.txt` | Proxy routing and egress allowlists. |
+| `vault/vault.hcl` | Vault server config. |
+| `config/` | App config templates. See [config/README.md](config/README.md). |
+| `deploy/`, `scripts/apply-host-tuning.sh` | Host settings that the CIS baseline does not provide. |
+| `scripts/` | Bootstrap, config rendering, validation, unseal, backup and restore. |
+| `inventory/` | Ansible examples used by [../README.md](../README.md). |
 
-### Deployment modes (set in `.env`, read by `cv.sh`)
+## Deployment modes
 
-- **External infra (recommended production)** - `CV_LOCAL_INFRA` unset. You provide Keycloak / Vault / MongoDB / Redis; backends reach them through the forced-egress Squid (`compose.egress.yml`). Point the `cv3-*` hostnames in `config/backend_config.json` at your real endpoints.
-- **Local infra (single host / test)** - `CV_LOCAL_INFRA=1`. Runs hardened Keycloak + Vault (non-dev) + MongoDB + Redis alongside CV3 (`compose.local-infra.yml`).
-- Set `CV_PUBLIC_HOST` to enable the TLS reverse proxy (sole public ingress on 80/443).
+Two variables in `.env` decide which overlays `cv.sh` loads.
 
-## 1. Host prerequisites
+| Variable | Value | Effect |
+|---|---|---|
+| `CV_LOCAL_INFRA` | `1` | Keycloak, Vault, MongoDB and Redis run on this host. Suited to a single-host deployment. |
+| | unset | External infra: you provide Keycloak, Vault, MongoDB and Redis. The backends reach them through the egress proxy. Recommended for production. |
+| `CV_PUBLIC_HOST` | hostname | Enables the Caddy TLS reverse proxy on ports 80/443, the only public entry point. |
+| | unset | No public entry point. |
 
-Provision a Debian/Ubuntu server on any platform, then from your control machine run the repo's two playbooks (see [../README.md](../README.md) §2–4):
+## 1. Host tuning
 
-```bash
-ansible-playbook -i <inventory> -l cafe-variome-node setup-playbook.yml          # CIS hardening + users + UFW
-ansible-playbook -i <inventory> -l cafe-variome-node install-docker-rootless.yml # rootless Docker
-```
-
-Use the examples in [`inventory/`](inventory/) - note the host must be **named** `cafe-variome-node` with its address in `ansible_host` so the `host_vars/` apply, and `POST_RUN_EXTRA_COMMANDS` must re-open 80/443 (the hardening UFW pass deletes unmanaged inbound rules).
-
-Then apply the host tuning the CIS baseline omits (raises ulimits, lets rootless bind 80/443, sets the rootless daemon limits) - **required**, or the stack can't start its containers or publish 80/443:
+Run once as an admin user. This step is required: without it, containers fail to start and the proxy cannot bind 80/443.
 
 ```bash
 sudo ./scripts/apply-host-tuning.sh dockeruser
 ```
 
+It raises the file and process limits, allows binding ports 80 and above without root, sets limits for the rootless daemon, and makes the systemd journal persistent.
+
 ## 2. Configure
 
-Copy `production/` to the rootless user's home (e.g. `/home/dockeruser/cafe-variome/`, owned by `dockeruser`), then as **dockeruser**:
+Copy `production/` to `dockeruser`'s home directory, for example `~/cafe-variome/production`, and make sure `dockeruser` owns it. Run everything from here on as `dockeruser`.
 
 ```bash
-cd ~/cafe-variome/production
 cp .env.template .env
-# Fill every CHANGE_ME. Generate strong, URL-safe values:  openssl rand -hex 32
-#   - CV_LOCAL_INFRA=1            (local-infra mode) or leave unset (external)
-#   - CV_PUBLIC_HOST=cafevariome.example.org   (or <ip>.sslip.io for a no-DNS test box)
-#   - ACME_EMAIL=you@example.org   (real Let's Encrypt) - or set CV_TLS=internal for a
-#                                   self-signed cert on a no-DNS box
-#   - KEYCLOAK_ADMIN_PASSWORD, KC_DB_PASSWORD, MONGO_ROOT_PASSWORD, MONGO_APP_PASSWORD,
-#     KEYCLOAK_CLIENT_SECRET            (local-infra)
 chmod +x cv.sh scripts/*.sh
-./scripts/render-config.sh           # config/*.template -> config/*.json (host-readable)
 ```
 
-`VAULT_ROLE_ID`/`VAULT_SECRET_ID` stay `CHANGE_ME` for now - the bootstrap fills them.
+Edit `.env` and replace every `CHANGE_ME`. Generate secrets with `openssl rand -hex 32`. MongoDB passwords must be alphanumeric.
 
-`cv.sh` runs `scripts/validate-env.sh` before anything that starts containers.
+| Variable | Required when | Notes |
+|---|---|---|
+| `KEYCLOAK_CLIENT_SECRET`, `ADMIN_EMAIL`, `ADMIN_AFFILIATION` | always | Used during first-run install. |
+| `VAULT_ROLE_ID`, `VAULT_SECRET_ID` | always | Local infra: leave as `CHANGE_ME`; the bootstrap script fills them in. External infra: get them from your Vault. |
+| `CV_PUBLIC_HOST` | TLS proxy | For example `cafevariome.example.org`, or `<ip>.sslip.io` on a test machine without DNS. |
+| `ACME_EMAIL` | TLS proxy | Let's Encrypt account email. |
+| `CV_TLS=internal` | optional | Uses a self-signed certificate instead of Let's Encrypt, and makes `ACME_EMAIL` unnecessary. For test machines without DNS. Not in the template; add it yourself. |
+| `KEYCLOAK_ADMIN_PASSWORD`, `KC_DB_PASSWORD`, `MONGO_ROOT_PASSWORD`, `MONGO_APP_PASSWORD` | local infra | |
+| `CV_BACKUP_AGE_RECIPIENT` or `CV_BACKUP_GPG_RECIPIENT` | recommended | Encrypts backups. See [Backup](#backup). |
 
-## 3. Deploy (local-infra mode)
+In external-infra mode, also list your Keycloak and Vault hosts in `allowed_domains.cv-egress.txt`.
 
-The backends need Vault AppRole credentials that only exist after Vault is initialised, so bring up the **infra first**, bootstrap, then the rest:
+Render the app config:
 
 ```bash
-# 3a. infra only
+./scripts/render-config.sh
+```
+
+This writes `config/*.json`. It needs `CV_PUBLIC_HOST` and `MONGO_APP_PASSWORD` to be set in every mode.
+
+`cv.sh` runs `scripts/validate-env.sh` before any command that starts containers. If a required value is missing or still a placeholder, a whole-stack start is refused; a start of named services only prints a warning. To skip the check once, set `CV_SKIP_ENV_CHECK=1`.
+
+## 3. Deploy
+
+### Local infra
+
+The backends need Vault AppRole credentials, and those only exist after Vault has been initialised. So start the infra first, bootstrap it, then start the rest.
+
+```bash
+# 1. Start the infra containers only
 ./cv.sh up -d cv3-vault cv3-mongo cv3-redis cv3-keycloak-postgres cv3-keycloak
 
-# 3b. provision prerequisites: init+unseal Vault, AppRole/policy/transit, Keycloak realm+
-#     client (+ service-account roles), Mongo app user (dbOwner). Writes VAULT_ROLE_ID/
-#     SECRET_ID + the unseal keys (secrets/vault-init.json).
+# 2. Initialise and unseal Vault, create the AppRole, Keycloak realm/client and Mongo app user.
+#    Writes VAULT_ROLE_ID/VAULT_SECRET_ID to .env and the unseal keys to secrets/vault-init.json.
 ./scripts/bootstrap_local_infra.sh
 
-# 3c. MOVE secrets/vault-init.json OFFLINE, then delete it from the host.
-#     unseal_vault.sh takes the shares on stdin (--stdin) or in CV_UNSEAL_KEYS, so you
-#     do NOT have to leave them on the box to stay able to unseal.
+# 3. Copy secrets/vault-init.json to offline storage, then delete it from the host.
 
-# 3d. start everything. cv.sh gates on validate-env.sh here (whole-stack start), so a
-#     missing/placeholder secret stops the deploy instead of half-starting it.
-#     On first start the db-manager runs the app install (seeds Mongo incl. config docs,
-#     writes the Vault KV, creates the initial admin).
+# 4. Start everything. On first start the db-manager seeds MongoDB and Vault and creates the initial admin.
 ./cv.sh up -d
-./cv.sh logs -f cv3-backend-dbm          # watch: "Created initial admin user ... with password cv_admin"
+./cv.sh logs -f cv3-backend-dbm
 ```
 
-The initial admin is `test_client_admin` (temp password `cv_admin`, must change at first login). For **external-infra mode**, skip 3a–3c, point `config/backend_config.json` at your real endpoints, and ensure that Vault/Keycloak already hold the CV3 AppRole + realm/client.
+The initial admin user is `test_client_admin`, with the temporary password `cv_admin`. You must change it at first login.
+
+### External infra
+
+Skip steps 1 to 3. Set the `cv3-*` hostnames in `config/backend_config.json` to your endpoints. Vault must already have the CV3 AppRole, and Keycloak must already have the realm and client. Then run `./cv.sh up -d`.
 
 ## 4. Verify
 
 ```bash
 H="$CV_PUBLIC_HOST"
-curl -sko /dev/null -w '/            %{http_code}\n' https://$H/
-curl -sko /dev/null -w '/api         %{http_code}\n' https://$H/api/
-curl -sko /dev/null -w '/query       %{http_code}\n' https://$H/query/
-curl -sko /dev/null -w '/federation  %{http_code}\n' https://$H/federation/
-curl -sk https://$H/auth/realms/cafe_variome/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+for p in / /api/ /query/ /federation/; do curl -sko /dev/null -w "$p %{http_code}\n" "https://$H$p"; done
+curl -sk "https://$H/auth/realms/cafe_variome/.well-known/openid-configuration" | grep -o '"issuer":"[^"]*"'
 ```
 
-All routes should be `200`; the OIDC issuer should be `https://$CV_PUBLIC_HOST/auth/realms/cafe_variome`.
+Every route should return `200`, and the issuer should be `https://$CV_PUBLIC_HOST/auth/realms/cafe_variome`.
 
 ## 5. Operations
 
-- **After any host or Vault restart** Vault boots *sealed*. Supply the shares without
-  storing them on the box:
+### Unseal Vault
+
+Vault starts sealed after every host or Vault restart. Unseal it, then restart the backends with `./cv.sh restart`.
+
+```bash
+./scripts/unseal_vault.sh --stdin                               # paste 3 shares, then Ctrl-D
+CV_UNSEAL_KEYS="$(pass cv3/unseal)" ./scripts/unseal_vault.sh   # or read them from a secret manager
+```
+
+If neither is given, the script reads `secrets/vault-init.json` and prints a warning.
+
+### Backup
+
+Local infra only. In external-infra mode, your managed services handle their own backups.
+
+```bash
+./scripts/backup.sh
+```
+
+This writes one tarball under `backups/`. It contains the Mongo dump, the Keycloak Postgres dump, Vault data, `.env`, `secrets/` and the rendered config. If `CV_BACKUP_AGE_RECIPIENT` or `CV_BACKUP_GPG_RECIPIENT` is set, the tarball is encrypted and the plaintext copy is deleted. Nothing in this repo schedules backups or copies them off the host; set that up yourself, for example with a cron job for `dockeruser`.
+
+### Restore
+
+Accepts `.tar`, `.tar.age` and `.tar.gpg`.
+
+```bash
+./scripts/restore.sh backups/<timestamp>.tar   # stops the backends and Keycloak, restores the data, restarts the infra
+./scripts/unseal_vault.sh --stdin              # use the unseal shares from when the backup was taken
+./cv.sh up -d
+```
+
+If the current `.env` has AppRole credentials newer than the backup, first restore `.env` from `config-secrets.tgz` inside the tarball.
+
+### Rotate credentials
+
+- The Vault AppRole `secret_id` expires 90 days after it is issued. You can change this with `VAULT_APPROLE_SECRET_ID_TTL` before running the bootstrap. Nothing warns you when it is about to expire. To rotate it, you need a Vault token with the `cv3` policy. The bootstrap revokes the root token; to get a new one, run `vault operator generate-root`.
 
   ```bash
-  ./scripts/unseal_vault.sh --stdin        # paste 3 shares, then Ctrl-D
-  CV_UNSEAL_KEYS="$(pass cv3/unseal)" ./scripts/unseal_vault.sh   # or from a secret manager
-  ./scripts/unseal_vault.sh                # falls back to secrets/vault-init.json (warns)
-  ```
-
-  Then `./cv.sh restart` the backends. (No cloud auto-unseal here - by design.)
-- **Backups** (local-infra): `./scripts/backup.sh` → one tarball under `backups/` (Mongo
-  dump + Keycloak Postgres dump with `--clean` + Vault data + secrets/config, mode 0600).
-  **Encrypt it**: set `CV_BACKUP_AGE_RECIPIENT` (or `CV_BACKUP_GPG_RECIPIENT`) in `.env`
-  and the script encrypts it here and shreds the plaintext; otherwise it warns, because
-  that one file holds the unseal shares, both DBs and `.env`. **Move it off-host** and
-  schedule it (e.g. a dockeruser cron) at whatever RPO you can afford to lose — nothing
-  in this repo schedules or ships it for you.
-- **Restore** (accepts `.tar`, `.tar.age`, `.tar.gpg`):
-
-  ```bash
-  ./scripts/restore.sh backups/<ts>.tar    # stops backends+Keycloak, restores Mongo/Postgres/Vault, restarts infra
-  ./scripts/unseal_vault.sh --stdin        # Vault boots sealed - ORIGINAL shares (from that backup era)
-  ./cv.sh up -d                            # start the stopped backends again
-  ```
-
-  If `VAULT_ROLE_ID`/`SECRET_ID` in the current `.env` postdate the backup, restore `.env` from the tarball's `config-secrets.tgz` first. In external-infra mode the managed services own their backups.
-- **Log retention**: containers log to the persistent host journal (1 year — see SECURITY.md § 6). Access log queries: `sudo journalctl CONTAINER_NAME=cv-proxy --since "..."`. Watch `journalctl --disk-usage` against the 10G cap.
-- **Image updates**: `renovate.json` opens grouped PRs for digest/version bumps (CV3 app images and infra images separately); majors are gated behind the dependency dashboard. The brookeslab images move under `:latest` - Renovate tracks the digest.
-- **Rotate** the bootstrap-only values (`KEYCLOAK_CLIENT_SECRET`, the initial admin password) after go-live; the `KEYCLOAK_CLIENT_SECRET`/`ADMIN_*` env on the db-manager can be blanked once the first install has run.
-- **Rotate the Vault AppRole credential before it expires.** `bootstrap_local_infra.sh` issues it with `secret_id_ttl=2160h` (90 days; override with `VAULT_APPROLE_SECRET_ID_TTL`) instead of the forever credential. **Nothing warns you unless you setup an alert on your own** as the date approaches - put it in a calendar. To rotate:
-
-  ```bash
-  # needs a Vault token with the cv3 policy (the bootstrap root token is revoked;
-  # regenerate one with `vault operator generate-root` if you have no other admin path)
   docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=<token> cv3-vault \
     vault write -f -field=secret_id auth/approle/role/cv3/secret-id
-  # put the new value in .env as VAULT_SECRET_ID, keep mode 600, then:
+  # Put the new value in .env as VAULT_SECRET_ID, then:
   ./cv.sh up -d
   ```
 
-## Troubleshooting (rootless specifics)
+- After go-live, rotate `KEYCLOAK_CLIENT_SECRET` and the initial admin password. Replace the shared Keycloak bootstrap admin with personal admin accounts.
 
-These bit during bring-up and are encoded in the compose/config - see SECURITY.md §3 for the reasoning:
+### Logs
 
-- **Proxy binds nothing on 80/443** → host tuning not applied (`apply-host-tuning.sh`), or the proxy is only on `internal:true` networks (it needs `cv_ingress`), or Caddy bound IPv6 (it's pinned to `tcp4/0.0.0.0` because pasta is `--ipv4-only`).
-- **Backend 502 through the proxy** → the image binds `127.0.0.1` by default; the compose sets `CV3_BIND=0.0.0.0:5000` (each image adds its own `+offset` → 5000/5100/5200).
-- **Keycloak admin/login 404** → the config's `Keycloak.URL`/`BackendURL` must end in `/` (python-keycloak builds `{URL}realms/...`).
-- **`PermissionError` reading config** → re-run `render-config.sh` (it `chmod 0644`s the rendered JSON so the in-container uid can read the read-only mount).
+All containers log to the host journal, which keeps logs for 1 year up to 10 GB.
+
+```bash
+sudo journalctl CONTAINER_NAME=cv-proxy --since "2026-01-01"   # HTTP access log
+journalctl --disk-usage
+```
+
+### Image updates
+
+Renovate opens pull requests that update image digests. CV3 app images and infra images are grouped separately, and major versions wait for approval on the dependency dashboard.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Nothing listens on 80/443 | `apply-host-tuning.sh` has not been run. |
+| 502 from a backend | The backend listens on `127.0.0.1`. The compose file sets `CV3_BIND=0.0.0.0:5000`; check that it is present. |
+| Keycloak admin or login returns 404 | `Keycloak.URL` and `BackendURL` in `config/backend_config.json` must end with `/`. |
+| `PermissionError` when a container reads its config | Run `./scripts/render-config.sh` again. It makes the rendered files readable by the container user. |

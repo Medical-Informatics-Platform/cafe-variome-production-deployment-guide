@@ -1,80 +1,101 @@
-# CV3 production deployment - security architecture
+# CV3 production security model
 
-This deployment layer applies a defence-in-depth model to the Cafe Variome v3 stack. Security rests on four boundaries - a hardened host, rootless Docker, per-container least privilege, and network segmentation - plus a pinned image supply chain and a no-hardcoded-secrets posture.
+This deployment relies on four layers of protection: a hardened host, rootless Docker, least privilege for each container, and network segmentation. It also pins every image by digest and keeps no secrets in the repo. Section 7 lists the risks that remain.
 
 ## 1. Host
 
-- **CIS-hardened Debian/Ubuntu** via the upstream `konstruktoid` roles (`setup-playbook.yml`): SSH locked to keys + an admin allowlist, root account disabled, auditd, UFW default-deny (only 80/443 inbound, a narrow egress set), restrictive `umask`/`limits`, logind hardening.
-- **Rootless Docker** (`install-docker-rootless.yml`): the daemon and every container run as the unprivileged `dockeruser` in a user namespace. A process running as root *inside* a container maps to `dockeruser`'s own host uid; non-zero container uids map into `dockeruser`'s subuid range. So a breakout does not reach host root  but it does reach `dockeruser`, which owns every volume, `.env` and the rendered config, and may bind host ports 80–1023 (see the sysctl below). 
-- **Host tuning the CIS baseline omits** (`scripts/apply-host-tuning.sh`, from `deploy/*.conf`):
-  - `nofile`/`nproc` raised for `dockeruser` and the user systemd manager (the CIS caps are too low for a ~14-container stack - first symptom is `error setting rlimit type 7: operation not permitted`).
-  - `net.ipv4.ip_unprivileged_port_start = 80` so the rootless proxy can bind 80/443. Scoped to 80+ (22 etc. stay privileged). **Trade-off:** any process of `dockeruser` may now bind 80–1023; acceptable because the host is single-tenant and dockeruser is already the container principal.
+- **CIS hardening** (`setup-playbook.yml`, using the konstruktoid roles):
+  - SSH login by key only, restricted to an admin network.
+  - Root account disabled.
+  - auditd enabled.
+  - UFW denies by default. Only 80/443 are open inbound, and outbound is limited to a short list.
+- **Rootless Docker** (`install-docker-rootless.yml`). The Docker daemon and all containers run as `dockeruser`.
+  - Root inside a container maps to `dockeruser` on the host, not to host root.
+  - A container breakout therefore reaches `dockeruser`. That user owns every volume, `.env` and the rendered config.
+- **Host tuning** (`scripts/apply-host-tuning.sh`):
+  - Raises `nofile`/`nproc` for `dockeruser`. The CIS limits are too low for this stack.
+  - Sets `net.ipv4.ip_unprivileged_port_start = 80` so the proxy can bind 80/443. Trade-off: any `dockeruser` process can bind ports 80–1023. This is acceptable because the host has a single tenant.
 
-## 2. Per-container least privilege (`compose.hardening.yml`)
+## 2. Container least privilege (`compose.hardening.yml`)
 
-The seven CV3 application services merge the `x-harden` anchor; the infra and proxy
-services in the overlays set the same fields explicitly (they need per-image tweaks).
+The app services share one hardening block. The infra and proxy services set the same fields individually.
 
-- `read_only: true` root filesystem; the few writable paths are explicit, size-capped `tmpfs` mounts (and owned by the in-image uid so they work under userns remap). **Keycloak is the one exception** — see §7.
-- `cap_drop: ["ALL"]`, then a minimal `cap_add` only where an image genuinely needs it: frontend nginx and Caddy `NET_BIND_SERVICE` (bind :80/:443); mongo `CHOWN/SETUID/SETGID/DAC_OVERRIDE` for its entrypoint's privilege drop; whichever egress squid is loaded, the same four (it drops to the `proxy` user). Four containers at a time, the two Squids are mutually exclusive, so all 15 defined services never run at once.
-- `security_opt: ["no-new-privileges:true"]`.
-- `pids_limit`, `ulimits.nofile`, `mem_limit`, `cpus` per service.
-- Non-root uid where the image allows it: Vault `100`, Keycloak Postgres `70`, Redis `999`, frontend nginx `101`. The CV3 backends already run as `appuser` (100).
-- Config files are mounted **read-only**; only the secrets each container needs are in its `environment:` (no shared `env_file`).
-
-> **Advisory limits.** Rootless Docker uses cgroup driver `none`, so `mem_limit`/`cpus` are **not kernel-enforced** - they document intent and back app-level limits. Treat host capacity planning, not cgroups, as the real resource boundary.
+- **Read-only root filesystem.** Writable paths are size-capped `tmpfs` mounts. Keycloak is the exception (see §7).
+- **`cap_drop: ALL`**, with capabilities added back only where an image needs them:
+  - frontend nginx and Caddy get `NET_BIND_SERVICE`;
+  - MongoDB and the active egress Squid get `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` to drop privileges at startup. Only one of the two egress Squids runs at a time.
+- **`no-new-privileges:true`.**
+- **Limits per service:** `pids_limit`, `ulimits.nofile`, `mem_limit` and `cpus`.
+- **Non-root users** where the image allows it: Vault `100`, Keycloak Postgres `70`, Redis `999`, nginx `101`, CV3 backends `appuser` (`100`).
+- **Config and secrets.** Config is mounted read-only. Each container receives only the secrets it needs, through `environment:`. There is no shared `env_file`.
 
 ## 3. Network segmentation
 
-The boundary that contains a compromised container. Three app networks are `internal: true` - Docker still assigns the bridge an address, but installs **no default route and no NAT/masquerade** for it, so a container on one has no IP path off the machine:
+Three networks are marked `internal: true`. Docker gives them no default route and no NAT, so a container attached only to these networks cannot reach anything outside the host.
 
-- `cv_edge` - the reverse proxy reaches the frontend + the three public backends + Keycloak.
-- `cv_backend` - inter-backend / worker coordination.
-- `cv_egress` - the lane backends use to reach Keycloak/Vault/MongoDB/Redis. In external-infra mode this is bridged outward only by the forced-egress Squid (`compose.egress.yml`); in local-infra mode the infra containers sit on it directly.
+| Network | Connects |
+|---|---|
+| `cv_edge` | The reverse proxy to the frontend, the three public backends and Keycloak. |
+| `cv_backend` | The backends and workers to each other. |
+| `cv_egress` | The backends to Keycloak, Vault, MongoDB and Redis. In local-infra mode the infra containers are on this network. In external-infra mode the egress Squid is the only way out. |
 
-**Forced egress.** The backends have no direct internet route; outbound goes through a Squid with a default-deny allowlist that also blocks SSRF targets (loopback, RFC1918, link-local incl. `169.254.169.254` cloud metadata, the stack's own Docker subnets).
+**Egress.** Backends reach the internet only through a Squid proxy. Its allowlist denies by default and also blocks loopback, RFC1918, link-local addresses (including `169.254.169.254`) and the stack's own subnets.
 
-**TLS reverse proxy** (`compose.reverse-proxy.yml`). Caddy terminates HTTPS for the whole stack (sees plaintext, holds the key) and is the sole public ingress (80/443). Its ACME client egresses only through a dedicated Let's-Encrypt-only Squid (`HTTP(S)_PROXY` → `cv-tls-egress-proxy`, allowlist = ACME endpoints).
+**Ingress.** Caddy (`cv-proxy`) terminates TLS and is the only public entry point. Its ACME client goes out through a second Squid that allows only Let's Encrypt endpoints. `cv-proxy` is also attached to a routed network, `cv_ingress`; see §7.
 
-> **Rootless ingress trade-off.** Rootless `pasta` cannot forward host ports to a container that is *only* on `internal: true` networks, so `cv-proxy` also joins one non-internal `cv_ingress` bridge for inbound 80/443. A non-internal bridge carries an egress route too, so the strong "no egress" guarantee does not hold for the public proxy itself - its outbound is constrained by the `HTTP(S)_PROXY` → ACME-squid config rather than by network isolation. Only `cv-proxy` joins `cv_ingress`; every backend and the infra stay on `internal: true` networks. Caddy also binds `tcp4/0.0.0.0` because pasta runs `--ipv4-only` and won't forward an IPv6 listener.
+## 4. Secrets and identity
 
-## 4. Secrets & identity
+- **Vault** runs in non-dev mode, with file storage and a real seal. There is no hardcoded root token and no auto-unseal.
+  - `bootstrap_local_infra.sh` initialises Vault with 5 key shares and a threshold of 3. It writes them to `secrets/vault-init.json` (mode `0600`, gitignored). Move that file offline.
+  - At the end of the bootstrap, the root token is revoked and removed from the file. `CV_KEEP_VAULT_ROOT_TOKEN=1` keeps it, for debugging only.
+- **AppRole.** Backends authenticate with `VAULT_ROLE_ID`/`VAULT_SECRET_ID`.
+  - The policy allows only the CV3 KV path and the transit keys.
+  - The `secret_id` expires after 90 days. Tokens last 1 hour, renewable up to 24 hours.
+  - For rotation, see [README.md](README.md#rotate-credentials).
+- **Keycloak** runs in production mode on its own Postgres, under `/auth`.
+  - The service account of the CV3 client has only the `manage-users`, `view-users` and `query-users` roles.
+  - The admin console, the admin API and the master realm return 403 at the public proxy. Administer Keycloak with `kcadm.sh` inside the container, or through an SSH tunnel (see `Caddyfile.reverse-proxy`).
+  - Brute-force detection is on. Login and admin events are kept for 1 year.
+  - Password policy: at least 12 characters, and not equal to the username.
+- **MongoDB** requires authentication. The CV3 image ignores the configured user and password, so the credentials are embedded in the host field (`user:pass@cv3-mongo`). The `cv3app` user can access only the `cafevariome` database.
+- **`validate-env.sh`**, run by `cv.sh` before any start, blocks a deployment when:
+  - a required secret is empty or looks like a placeholder;
+  - a MongoDB password is not alphanumeric;
+  - external-infra mode is used but the egress allowlist is empty.
 
-- **Vault in non-dev mode**: file storage, persistent, real seal/unseal - **no hardcoded root token**. Initialised once by `scripts/bootstrap_local_infra.sh`, which writes the unseal keys + root token to `secrets/vault-init.json` (gitignored, `0600`). **Move that file offline and delete it from the host.** Vault boots **sealed** after any restart; re-unseal with `scripts/unseal_vault.sh`. There is no cloud auto-unseal here.
-- Backends authenticate to Vault with an **AppRole** (`VAULT_ROLE_ID`/`VAULT_SECRET_ID`), scoped by a policy to the CV3 KV path + transit keys only. The credential is **time-bounded**: `secret_id_ttl` 90d (override with `VAULT_APPROLE_SECRET_ID_TTL`), tokens 1h/24h. Rotate before expiry — `vault write -f auth/approle/role/cv3/secret-id`, then update `.env` and restart the backends. **Diarise this**: nothing here warns you as the TTL approaches.
-- The **bootstrap root token is revoked** at the end of `bootstrap_local_infra.sh` and stripped from `secrets/vault-init.json` (keep `CV_KEEP_VAULT_ROOT_TOKEN=1` only for debugging). If you ever need root again, regenerate it from the unseal shares with `vault operator generate-root`.
-- **Keycloak** runs in prod mode on its own Postgres, behind the TLS proxy at `/auth`. The db-manager's first-run installer creates the realm client + initial admin; that client's service account holds only the `realm-management` roles it needs (`manage/view/query users`). Additional best practices applied to the local realm (bootstrap + Caddyfile): the **admin console/API and master realm are blocked at the public edge** (403; admin access is via `kcadm.sh` in the container or an on-demand loopback tunnel - see `Caddyfile.reverse-proxy`), **brute-force detection** is on, **login + admin events** are recorded (1-year expiration, and successful logins are also surfaced into the container log -> journal), and a **password policy** (`length(12) and notUsername`) is set. Remaining operator duties: rotate `KC_BOOTSTRAP_ADMIN_*` after go-live (create named per-person admins, then delete the shared bootstrap admin) and keep the Keycloak image current via Renovate.
-- **MongoDB auth is enabled.** The CV3 image ignores the config's `User`/`Password` and builds an unauthenticated URI, so the app credentials are embedded in the connection `Host` (`user:pass@cv3-mongo`) to keep auth on; the `cv3app` user is scoped to the `cafevariome` DB. Use URL-safe (hex) passwords. The defence-in-depth here is auth **plus** the internal-only network - Mongo is never reachable off `cv_egress`.
-- `scripts/validate-env.sh` is a fail-closed gate, and `cv.sh` **runs it automatically** before any command that can start containers (`up`/`create`/`run`/`start`/`restart`); `config`/`ps`/`logs`/`down` stay usable on a half-configured box. It refuses to deploy while a required secret is empty or still looks like a placeholder (substring match, so `CHANGE_ME_now` is caught too), warns on short secrets, rejects a non-alphanumeric Mongo password (it goes into a `sed` replacement *and* the Mongo URI), refuses external-infra mode while `allowed_domains.cv-egress.txt` is comment-only, and tightens `.env` to `0600`. Override once with `CV_SKIP_ENV_CHECK=1`. It **parses** `.env` rather than sourcing it — `. .env` would execute a `$(...)` in a password.
-- Gitignored, never committed: `.env`, rendered `config/*.json` (carry the Mongo password), `secrets/`, `backups/`.
-- **Backups are encryptable at rest.** Set `CV_BACKUP_AGE_RECIPIENT` (or `CV_BACKUP_GPG_RECIPIENT`) in `.env` and `scripts/backup.sh` encrypts the tarball, which otherwise holds the unseal shares, both DB dumps and `.env` in one plaintext file. Keep the decryption key off this host. Nothing here schedules or ships backups — that is still an operator duty.
+  It also warns about short secrets and sets `.env` to mode `0600`.
+- **Never committed** (gitignored): `.env`, `config/*.json` (they contain the MongoDB password), `secrets/`, `backups/`.
+- **Backups** contain the unseal shares, both database dumps and `.env`. Set an age or GPG recipient so `backup.sh` encrypts them, and keep the decryption key off this host.
 
 ## 5. Image supply chain
 
-- Every image is pinned by immutable digest (`repo:tag@sha256:…`) - the third-party CV3 images and all infra images (Vault, Keycloak, Postgres, Mongo, Redis, Caddy, Squid). This includes the helper container `backup.sh`/`restore.sh` use to tar the Vault volume: it reads the already-pinned alpine digest out of `compose.local-infra.yml` rather than pulling a floating `busybox`/`alpine` while a data volume is mounted, and **refuses to run** if it cannot resolve it.
-- **Renovate** (`renovate.json`) tracks those pins and opens grouped PRs for digest/version bumps: minors auto-proposed, **majors gated** behind the dependency dashboard, no automerge, with merge-confidence + changelog context. `pinDigests` is on for the whole `docker-compose` manager, so an image added as a bare `repo:tag` gets pinned rather than silently escaping the guarantee above.
-- **What pinning does not buy.** It proves the bytes you run are the bytes that were pinned, so tag mutation, registry compromise reusing a tag, and accidental drift all fail. It says nothing about whether those bytes are trustworthy: there is **no signature/attestation verification, no SBOM and no vulnerability scan** on CV yet; the mitigation is the containment in §2–§3.
+- Every image is pinned by digest (`repo:tag@sha256:…`). This includes the helper container that `backup.sh` and `restore.sh` use; they refuse to run if its pinned digest cannot be found.
+- Renovate proposes digest and version updates. Major versions need approval on the dependency dashboard, nothing is merged automatically, and `pinDigests` pins any image added without a digest.
+- CI checks that the compose files merge in both modes, that every image is pinned, and that the scripts parse.
+- Limits: pinning guarantees you run exactly the bytes you pinned. It does not show that those bytes are safe. There is no signature verification, SBOM or vulnerability scanning.
 
-## 6. Logging & audit retention (compliance)
+## 6. Logging and retention
 
-Access/audit logs are a hard requirement here: they must survive stack redeploys and host reboots and be retained for **one year**.
+Access and audit logs must survive redeploys and reboots, and are kept for 1 year.
 
-- **Every container logs to the host systemd journal** (compose `journald` driver, tagged with the container name). Per-container `json-file` logs would be deleted on every container recreation - that is why they are not used. `cv.sh logs` / `docker logs` keep working (journald read-back).
-- **The journal is made genuinely persistent** by `scripts/apply-host-tuning.sh`: the CIS hardening sets `Storage=persistent` but never creates `/var/log/journal`, so out of the box the journal is volatile and lost on reboot. The script creates the directory, installs `deploy/journald-cv3.conf` (`MaxRetentionSec=1year`, `SystemMaxUse=10G`, `SystemKeepFree=5G`, raised rate limits so bursty access logs aren't dropped) and flushes the volatile store.
-- **HTTP access log**: Caddy (`cv-proxy`) writes one structured JSON line per request (timestamp, client IP, method, URI, status, user agent) to stdout -> journal. Query: `sudo journalctl CONTAINER_NAME=cv-proxy --since "..."`.
-- **Identity audit**: Keycloak login/admin events are stored in its DB for a year (realm `eventsExpiration`) *and* successful/failed logins appear in its container log -> journal.
-- **Caveats**: size caps evict oldest-first even inside the retention window - keep `SystemMaxUse` generous and watch `journalctl --disk-usage`; for court-grade immutability, ship the journal to an external WORM store (out of scope here).
+- Every container uses the `journald` log driver. `json-file` logs would be lost whenever a container is recreated.
+- `apply-host-tuning.sh` makes the journal persistent by creating `/var/log/journal`, which the CIS role does not do. It also installs `deploy/journald-cv3.conf`: `MaxRetentionSec=1year`, `SystemMaxUse=10G`, `SystemKeepFree=5G`, and higher rate limits.
+- Caddy writes one JSON line per request (time, client IP, method, URI, status, user agent). Query it with `sudo journalctl CONTAINER_NAME=cv-proxy`.
+- Keycloak keeps login and admin events in its database for 1 year, and also writes logins to the journal.
+- Caveats:
+  - When the size cap is reached, the oldest entries are deleted even if they are less than a year old. Monitor usage with `journalctl --disk-usage`.
+  - For tamper-proof retention, ship the journal to external WORM storage. This is not covered here.
 
-## 7. Residual risks / hardening backlog
+## 7. Residual risks
 
-The paragraph below describes the known and accepted risks in this repository.
-
-- **DNS is not filtered.** Docker's embedded resolver (`127.0.0.11`) answers on `internal: true` networks too, and the Squid allowlists never see it. It is a "no IP egress". A low-bandwidth DNS side channel remains available to a compromised container. Closing it woul mean pinning the resolver and logging/alerting on query volume.
-- **The public proxy has a route out.** Rootless `pasta` cannot forward host ports into a container that only has internal networks, so `cv-proxy` also joins the routed `cv_ingress` bridge (see §3). Its outbound is constrained by `HTTP(S)_PROXY` env, which a deliberately compromised process can ignore.
-- **Resource limits are advisory** (§2): cgroup driver `none`, so `mem_limit`/`cpus` — and `pids_limit`, which uses the same mechanism document intent here. Kernel-enforced: `ulimits.nofile`, tmpfs `size=` caps, journald retention caps. CPU is not capped by the container. Verify the driver on the host with `docker info -f '{{.CgroupDriver}}'`.
-- **No isolation *within* a lane.** `DOCKER_IGNORE_BR_NETFILTER_ERROR=1` (`deploy/br-netfilter.conf`) is required because the hardened host has no `br_netfilter`, and it skips the inter-container-communication iptables refinement. Cross-network is still hard-blocked by topology; port-level restriction between peers that *share* a lane is not enforced. On `cv_egress` that means Vault, Mongo and Redis all speak **plaintext**, and **Redis is unauthenticated** - any container on that lane can read the cache. Closing it involves restoring ICC restriction, or authenticating Redis and adding in-lane TLS.
-- **Keycloak rootfs is writable** (`start --optimized=false` augments at boot). Build a pre-optimised image and switch it to `read_only` to mitigate this. It is recommended to use one own organisation's managed Keycloak.
-- **Unseal-key custody.** `bootstrap_local_infra.sh` writes all five shares to `secrets/vault-init.json`, and the 5-of-3 threshold gives no custodian separation while they sit in one file. `unseal_vault.sh` now accepts shares via `--stdin` or `CV_UNSEAL_KEYS`. It is recommended to use one own organisation's managed Vault.
-- **No monitoring or alerting.** Metrics/log ship disabled in `config/backend_config.json.template`. The journal has the logs (§6) but nothing watches it.
-- **No edge rate limiting** and no client certificates on the admin API. Security response headers are set at the Caddy edge, but there is no CSP (the SPA's inline/eval usage is unaudited).
-- **Caddy/`tls internal` on a no-DNS test box** is self-signed; production uses a real domain + Let's Encrypt over the egress squid (the ACME path is otherwise identical).
+| Risk | Mitigation |
+|---|---|
+| DNS is not filtered. Docker's resolver answers on internal networks, so a compromised container has a low-bandwidth DNS side channel. | Pin the resolver, and log and alert on query volume. |
+| `cv-proxy` has a route out. Rootless `pasta` cannot forward ports to a container that is only on internal networks, so it also joins `cv_ingress`. Its egress is limited only by `HTTP(S)_PROXY`, which a compromised process can ignore. Caddy binds `tcp4/0.0.0.0` because pasta forwards IPv4 only. | None in place. |
+| Resource limits are not enforced by the kernel. Rootless Docker uses cgroup driver `none`, so `mem_limit`, `cpus` and `pids_limit` have no effect. `ulimits.nofile`, tmpfs sizes and journald caps are enforced. Check the driver with `docker info -f '{{.CgroupDriver}}'`. | Plan host capacity. |
+| No isolation between containers on the same network. The host has no `br_netfilter` (`deploy/br-netfilter.conf`), so inter-container restrictions are skipped. On `cv_egress`, Vault, MongoDB and Redis traffic is plaintext, and Redis has no authentication. | Restore ICC restrictions, or add Redis authentication and TLS on that network. |
+| Keycloak's root filesystem is writable, because `start --optimized=false` builds at boot. | Build a pre-optimised image and set `read_only`, or use your organisation's managed Keycloak. |
+| All 5 unseal shares are stored in one file, so the 3-of-5 threshold does not separate custodians. | Hand the shares to separate people and use `unseal_vault.sh --stdin`, or use your organisation's managed Vault. |
+| No monitoring or alerting. Metrics and log shipping are disabled in `backend_config.json.template`. | Add external monitoring. |
+| No rate limiting at the proxy and no CSP. Security headers are set, but the SPA's inline and eval usage has not been audited. | None in place. |
+| With `CV_TLS=internal` the certificate is self-signed. | Use a real domain and Let's Encrypt in production. |
