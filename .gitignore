@@ -14,3 +14,6 @@ production/.restore-tmp/
 # *.example files for manual A-Z passes; never commit (contains IP + credentials).
 production/inventory/inventory
 production/inventory/host_vars/cafe-variome-node/vars.yml
+
+# Federation: private CA certificates for peers (host-specific)
+production/federation/extra-ca.pem

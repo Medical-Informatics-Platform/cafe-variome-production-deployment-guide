@@ -13,11 +13,17 @@ ENV_FILE="${1:-$here/.env}"
 # Parse .env instead of sourcing it. `. .env` executes the file, so a stray
 # backtick or $(...) in a password would run as shell - this file is data, not code.
 declare -A ENVV=()
+UNQUOTED=()
 while IFS= read -r line || [ -n "$line" ]; do
   line="${line%$'\r'}"                                  # tolerate CRLF
   [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
   [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
   key="${BASH_REMATCH[2]}"; val="${BASH_REMATCH[3]}"
+  # render-config.sh, bootstrap_local_infra.sh and backup.sh source .env, where an
+  # unquoted value with a space runs its second word as a command.
+  if [[ "$val" =~ [[:space:]] ]] && [[ ! "$val" =~ ^\".*\"$ ]] && [[ ! "$val" =~ ^\'.*\'$ ]]; then
+    UNQUOTED+=("$key")
+  fi
   # strip one layer of matching quotes; leave the value otherwise untouched
   if [[ "$val" =~ ^\"(.*)\"$ ]] || [[ "$val" =~ ^\'(.*)\'$ ]]; then val="${BASH_REMATCH[1]}"; fi
   ENVV["$key"]="$val"
@@ -49,6 +55,10 @@ weak() {
 }
 
 echo "Validating $ENV_FILE ..."
+
+for k in "${UNQUOTED[@]}"; do
+  echo "  ✗ $k contains spaces: wrap the value in double quotes"; fail=1
+done
 
 # Always required - every backend authenticates to Vault with these.
 req VAULT_ROLE_ID
@@ -99,6 +109,34 @@ else
   if ! grep -qE '^[[:space:]]*[^#[:space:]]' "$here/allowed_domains.cv-egress.txt" 2>/dev/null; then
     echo "  ✗ allowed_domains.cv-egress.txt has no active entries (comments only)"; fail=1
   fi
+fi
+
+# Federation (FEDERATION.md).
+active_lines() { grep -E '^[[:space:]]*[^#[:space:]]' "$1" 2>/dev/null || true; }
+kc_url="$(get CV_KEYCLOAK_URL)"
+if [ "$(get CV_FEDERATION)" = "1" ]; then
+  [ -n "$(get CV_PUBLIC_HOST)" ] || { echo "  ✗ CV_FEDERATION=1 needs CV_PUBLIC_HOST"; fail=1; }
+  if [ "$(get CV_TLS)" = "internal" ]; then
+    echo "  ! CV_TLS=internal: peers reject a self-signed certificate unless they add this"
+    echo "    host's Caddy root CA to their federation/extra-ca.pem."
+  fi
+  if [ -z "$(active_lines "$here/allowed_domains.federation.txt")" ]; then
+    echo "  ! allowed_domains.federation.txt is empty: no peer is reachable yet."
+  fi
+  if [ -n "$kc_url" ]; then
+    [[ "$kc_url" == https://* ]] || { echo "  ✗ CV_KEYCLOAK_URL must start with https://"; fail=1; }
+    kc_client="$(get KC_CLIENT)"
+    if [ -z "$kc_client" ] || [ "$kc_client" = "test_client" ]; then
+      echo "  ✗ CV_KEYCLOAK_URL is set: KC_CLIENT must be the client created for this"
+      echo "    installation on the Keycloak host (federation_add_peer_client.sh)"; fail=1
+    fi
+    kc_host="${kc_url#https://}"; kc_host="${kc_host%%/*}"; kc_host="${kc_host%%:*}"
+    if ! active_lines "$here/allowed_domains.federation.txt" | grep -qxF "$kc_host"; then
+      echo "  ✗ $kc_host (CV_KEYCLOAK_URL) must be listed in allowed_domains.federation.txt"; fail=1
+    fi
+  fi
+elif [ -n "$kc_url" ]; then
+  echo "  ✗ CV_KEYCLOAK_URL needs CV_FEDERATION=1"; fail=1
 fi
 
 # The file holds every secret in the deployment; it must not be world/group readable.

@@ -69,12 +69,26 @@ jobs:
             -f compose.egress.yml -f compose.reverse-proxy.yml \
             config > /tmp/ext.yml
 
+      - name: Merge - federation (local infra + shared Keycloak, and external infra)
+        working-directory: production
+        run: |
+          docker compose --env-file .env \
+            -f docker-compose.yml -f compose.hardening.yml \
+            -f compose.local-infra.yml -f compose.reverse-proxy.yml \
+            -f compose.federation.yml -f compose.shared-keycloak.yml \
+            config > /tmp/fed.yml
+          docker compose --env-file .env \
+            -f docker-compose.yml -f compose.hardening.yml \
+            -f compose.egress.yml -f compose.reverse-proxy.yml \
+            -f compose.federation.yml \
+            config > /tmp/fed-ext.yml
+
       - name: Every image must be digest-pinned
         # The guarantee SECURITY.md § 5 makes. A Renovate PR that introduces a bare
         # tag, or a hand edit that drops a digest, fails here instead of shipping.
         run: |
           fail=0
-          for f in /tmp/local.yml /tmp/ext.yml; do
+          for f in /tmp/local.yml /tmp/ext.yml /tmp/fed.yml /tmp/fed-ext.yml; do
             while read -r img; do
               case "$img" in
                 *@sha256:*) ;;
@@ -99,7 +113,7 @@ jobs:
           fi
           python3 - <<'PY'
           import re, sys
-          t = open('/tmp/local.yml').read()
+          t = open('/tmp/local.yml').read() + open('/tmp/fed.yml').read()
           pub = re.findall(r'published: "?(\d+)"?', t)
           allowed = {"80", "443"}
           bad = sorted(set(pub) - allowed)

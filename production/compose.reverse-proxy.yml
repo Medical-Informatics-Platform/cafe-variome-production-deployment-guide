@@ -48,6 +48,9 @@ services:
       # email = public Let's Encrypt; "internal" = Caddy self-signed CA (no inbound).
       CV_TLS: ${CV_TLS:-${ACME_EMAIL:-admin@example.com}}
       CV_ACME_CA: ${CV_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      # Peer IPs allowed to call this Keycloak's realm admin API (shared Keycloak,
+      # FEDERATION.md). The default is a TEST-NET address that never matches.
+      CV_KC_ADMIN_PEERS: ${CV_KC_ADMIN_PEERS:-192.0.2.1/32}
       # Caddy has no direct internet route; its ACME client egresses only via the proxy.
       HTTP_PROXY: http://cv-tls-egress-proxy:3128
       HTTPS_PROXY: http://cv-tls-egress-proxy:3128
@@ -63,7 +66,11 @@ services:
       cv_ingress: {}       # inbound publish of 80/443. Rootless pasta cannot forward host
                            # ports to a container that is ONLY on internal:true networks,
                            # so the public proxy needs one non-internal bridge here.
-      cv_edge: {}          # reach frontend + the 3 public backends (+ keycloak, local-infra)
+      cv_edge:             # reach frontend + the 3 public backends (+ keycloak, local-infra)
+        # The backends call their own public URL (Keycloak.URL for token/introspect/
+        # userinfo, and the network backend's self-check). They have no route out, so
+        # resolve the public hostname to this proxy on cv_edge.
+        aliases: ["${CV_PUBLIC_HOST}"]
       cv_proxy_egress: {}  # ACME egress via cv-tls-egress-proxy (its HTTP(S)_PROXY target)
     logging:
       # Journald: survives container recreation + host reboots; retention via

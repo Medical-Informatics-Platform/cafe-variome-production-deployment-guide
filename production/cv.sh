@@ -23,7 +23,7 @@ export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 
-env_get() { grep -E "^$1=" "$here/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+env_get() { grep -E "^$1=" "$here/.env" 2>/dev/null | tail -1 | cut -d= -f2- | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" || true; }
 [ -z "${CV_PUBLIC_HOST:-}" ] && CV_PUBLIC_HOST="$(env_get CV_PUBLIC_HOST)"
 [ -z "${CV_LOCAL_INFRA:-}" ] && CV_LOCAL_INFRA="$(env_get CV_LOCAL_INFRA)"
 
@@ -41,6 +41,20 @@ fi
 if [ -n "${CV_PUBLIC_HOST:-}" ] && [ -f compose.reverse-proxy.yml ]; then
   export CV_PUBLIC_HOST
   files+=(-f compose.reverse-proxy.yml)
+fi
+
+# Optional federation (FEDERATION.md). Loaded last so its HTTP(S)_PROXY values win.
+#   CV_FEDERATION=1  -> filtered egress to peers (compose.federation.yml)
+#   CV_KEYCLOAK_URL  -> use another installation's Keycloak (compose.shared-keycloak.yml)
+[ -z "${CV_FEDERATION:-}" ] && CV_FEDERATION="$(env_get CV_FEDERATION)"
+[ -z "${CV_KEYCLOAK_URL:-}" ] && CV_KEYCLOAK_URL="$(env_get CV_KEYCLOAK_URL)"
+if [ "${CV_FEDERATION:-0}" = "1" ]; then
+  [ -n "${CV_PUBLIC_HOST:-}" ] || { echo "CV_FEDERATION=1 needs CV_PUBLIC_HOST (peers reach you over HTTPS)." >&2; exit 1; }
+  files+=(-f compose.federation.yml)
+  [ -n "${CV_KEYCLOAK_URL:-}" ] && files+=(-f compose.shared-keycloak.yml)
+elif [ -n "${CV_KEYCLOAK_URL:-}" ]; then
+  echo "CV_KEYCLOAK_URL is set but CV_FEDERATION is not 1; the backends would have no route to it." >&2
+  exit 1
 fi
 
 # Fail-closed secrets gate. SECURITY.md calls validate-env.sh a gate that "refuses to

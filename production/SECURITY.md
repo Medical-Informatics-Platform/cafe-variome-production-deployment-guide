@@ -43,6 +43,13 @@ Three networks are marked `internal: true`. Docker gives them no default route a
 
 **Ingress.** Caddy (`cv-proxy`) terminates TLS and is the only public entry point. It holds the TLS key and sees all traffic in plaintext. Its ACME client goes out through a second Squid that allows only Let's Encrypt endpoints. `cv-proxy` is also attached to a routed network, `cv_ingress`; see §7.
 
+**Internal alias.** On `cv_edge`, the public hostname resolves to `cv-proxy`. The backends call their own public URL (Keycloak token checks, the network backend's self-check) without any route out.
+
+**Federation** (optional, `CV_FEDERATION=1`, [FEDERATION.md](FEDERATION.md)).
+- The network and query-meta backends also join `cv_federation`. Their only way out is `cv-federation-proxy`, which allows only listed peers.
+- CV3's HTTP client ignores proxy settings, so a mounted `sitecustomize.py` changes that default. This keeps peer traffic filtered.
+- With a shared Keycloak, the admin, query and db-manager backends also use this proxy. The Keycloak host then accepts realm admin API calls from the peer IPs in `CV_KC_ADMIN_PEERS`.
+
 ## 4. Secrets and identity
 
 - **Vault** runs in non-dev mode, with file storage and a real seal. There is no hardcoded root token and no auto-unseal.
@@ -101,3 +108,6 @@ None of the fixes in the right-hand column are implemented in this repo.
 | No monitoring or alerting. Metrics and log shipping are disabled in `backend_config.json.template`. | Add external monitoring. |
 | No rate limiting at the proxy and no CSP. Security headers are set, but the SPA's inline and eval usage has not been audited. | No fix proposed yet. |
 | With `CV_TLS=internal` the certificate is self-signed. | Use a real domain and Let's Encrypt in production. |
+| Federation relies on `sitecustomize.py`. If a CV3 update stops using aiohttp's `ClientSession`, peer traffic fails closed (no route); it does not bypass the proxy. | After image updates, check `cv3-backend-network` logs and the federation proxy's access log. |
+| Federation with a shared Keycloak: each peer's service account holds `manage-users` in the shared realm, so a compromised peer can change other installations' users. | Only federate with trusted operators. Restrict `CV_KC_ADMIN_PEERS` to their exact IPs. |
+| Federation protocol weak spots: inbound requests are not timestamp-checked (only message-ID de-duplication prevents replay), validation failures return `200`, and `/federation/` is public without rate limiting. | No fix proposed yet. |

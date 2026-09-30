@@ -88,7 +88,17 @@
 		#         -p 127.0.0.1:8081:8080 alpine/socat tcp-listen:8080,fork,reuseaddr tcp:cv3-keycloak:8080
 		#       ssh -L 8081:127.0.0.1:8081 <admin>@<host>  ->  http://localhost:8081/auth/admin/
 		#       docker rm -f kc-tunnel   # when done
-		@kc_admin path /auth/admin* /auth/realms/master/*
+		# Exception for federation with a shared Keycloak (FEDERATION.md): peer
+		# installations listed in CV_KC_ADMIN_PEERS may call this realm's admin REST
+		# API (their db-manager and admin backend manage their users here). The
+		# console and the master realm stay blocked for everyone.
+		@kc_admin {
+			path /auth/admin* /auth/realms/master/*
+			not {
+				path /auth/admin/realms/cafe_variome/*
+				remote_ip {$CV_KC_ADMIN_PEERS:192.0.2.1/32}
+			}
+		}
 		respond @kc_admin 403
 		reverse_proxy cv3-keycloak:8080
 	}

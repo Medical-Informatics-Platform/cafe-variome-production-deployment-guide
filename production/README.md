@@ -2,6 +2,8 @@
 
 Runs Cafe Variome v3 with rootless Docker on a host provisioned as described in [../README.md](../README.md). The security controls and their trade-offs are described in [SECURITY.md](SECURITY.md). Read this document fully once before starting the work.
 
+By default this is an isolated installation. To join a network with other CV3 installations, set `CV_FEDERATION=1` and follow [FEDERATION.md](FEDERATION.md).
+
 Run every command in this directory through `./cv.sh`. It is a wrapper around `docker compose` that chooses the compose overlays from `.env`.
 
 ## Layout
@@ -13,12 +15,13 @@ Run every command in this directory through `./cv.sh`. It is a wrapper around `d
 | `compose.local-infra.yml` | Keycloak, Vault, MongoDB and Redis, for local-infra mode. |
 | `compose.egress.yml` | Squid egress proxy, for external-infra mode. |
 | `compose.reverse-proxy.yml` | Caddy TLS reverse proxy, plus a Squid that allows only ACME traffic. |
+| `compose.federation.yml`, `compose.shared-keycloak.yml`, `federation/` | Optional federation. See [FEDERATION.md](FEDERATION.md). |
 | `cv.sh` | `docker compose` wrapper. |
 | `Caddyfile.reverse-proxy`, `squid.*.conf`, `allowed_domains.*.txt` | Proxy routing and egress allowlists. |
 | `vault/vault.hcl` | Vault server config. |
 | `config/` | App config templates. See [config/README.md](config/README.md). |
 | `deploy/`, `scripts/apply-host-tuning.sh` | Host settings that the CIS baseline does not provide. |
-| `scripts/` | Bootstrap, config rendering, validation, unseal, backup and restore. |
+| `scripts/` | Bootstrap, config rendering, validation, unseal, backup, restore and federation helpers. |
 | `inventory/` | Ansible examples used by [../README.md](../README.md). |
 
 ## Deployment modes
@@ -62,6 +65,9 @@ Edit `.env` and replace every `CHANGE_ME`. Generate secrets with `openssl rand -
 | `CV_TLS=internal` | optional | Uses a self-signed certificate instead of Let's Encrypt, and makes `ACME_EMAIL` unnecessary. For test machines without DNS. Not in the template; add it yourself. |
 | `KEYCLOAK_ADMIN_PASSWORD`, `KC_DB_PASSWORD`, `MONGO_ROOT_PASSWORD`, `MONGO_APP_PASSWORD` | local infra | |
 | `CV_BACKUP_AGE_RECIPIENT` or `CV_BACKUP_GPG_RECIPIENT` | recommended | Encrypts backups. See [Backup](#backup). |
+| `CV_FEDERATION`, `KC_CLIENT`, `CV_KEYCLOAK_URL`, `CV_KC_ADMIN_PEERS` | federation | See [FEDERATION.md](FEDERATION.md). |
+
+A value that contains spaces must be in double quotes. Some scripts load `.env` as shell code.
 
 In external-infra mode, also list your Keycloak and Vault hosts in `allowed_domains.cv-egress.txt`.
 

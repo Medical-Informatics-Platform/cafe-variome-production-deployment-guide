@@ -16,12 +16,27 @@ set -a; . ./.env; set +a
 MONGO_APP_USERNAME="${MONGO_APP_USERNAME:-cv3app}"
 : "${MONGO_APP_PASSWORD:?set MONGO_APP_PASSWORD in .env}"
 
+# Keycloak client and URLs. Defaults: this host's Keycloak behind the proxy (URL) and
+# in-stack (BackendURL). CV_KEYCLOAK_URL (federation with a shared Keycloak) points
+# both at another installation's Keycloak. python-keycloak needs the trailing slash.
+KC_CLIENT="${KC_CLIENT:-test_client}"
+if [ -n "${CV_KEYCLOAK_URL:-}" ]; then
+  KC_URL="${CV_KEYCLOAK_URL%/}/"
+  KC_BACKEND_URL="$KC_URL"
+else
+  KC_URL="https://${CV_PUBLIC_HOST}/auth/"
+  KC_BACKEND_URL="http://cv3-keycloak:8080/auth/"
+fi
+
 shopt -s nullglob
 for t in config/*.template; do
   out="config/$(basename "$t" .template)"   # *.json.template -> *.json
   sed -e "s|__CV_PUBLIC_HOST__|${CV_PUBLIC_HOST}|g" \
       -e "s|__MONGO_APP_USERNAME__|${MONGO_APP_USERNAME}|g" \
       -e "s|__MONGO_APP_PASSWORD__|${MONGO_APP_PASSWORD}|g" \
+      -e "s|__KC_CLIENT__|${KC_CLIENT}|g" \
+      -e "s|__KC_URL__|${KC_URL}|g" \
+      -e "s|__KC_BACKEND_URL__|${KC_BACKEND_URL}|g" \
       "$t" > "$out"
   # The containers run as their own in-image uid (appuser 100 / nginx 101), which under
   # userns remap is "other" relative to these dockeruser-owned files. A CIS-hardened

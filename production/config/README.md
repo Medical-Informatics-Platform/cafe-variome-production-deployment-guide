@@ -1,6 +1,6 @@
 # CV3 config
 
-`../scripts/render-config.sh` creates the `*.json` files from the `*.template` files. It replaces `__CV_PUBLIC_HOST__`, `__MONGO_APP_USERNAME__` and `__MONGO_APP_PASSWORD__` with the values in `.env`. The rendered files are gitignored and are mounted read-only into the containers.
+`../scripts/render-config.sh` creates the `*.json` files from the `*.template` files. It replaces the `__CV_PUBLIC_HOST__`, `__MONGO_APP_*__` and `__KC_*__` tokens with values from `.env`. The rendered files are gitignored and are mounted read-only into the containers.
 
 | File | Mounted into | Purpose |
 |---|---|---|
@@ -12,7 +12,7 @@
 ## Notes
 
 - **Frontend URLs** use the reverse-proxy paths under `https://$CV_PUBLIC_HOST`: `/api` goes to the admin backend, `/query` to the query backend, `/federation` to the network backend.
-- **`Keycloak.URL`** is the address browsers use (`https://$CV_PUBLIC_HOST/auth/`). **`BackendURL`** is the address inside Docker (`http://cv3-keycloak:8080/auth/`). Both must end with `/`.
+- **`Keycloak.URL`** is the address browsers use (`https://$CV_PUBLIC_HOST/auth/`). **`BackendURL`** is the address inside Docker (`http://cv3-keycloak:8080/auth/`). Both must end with `/`. If `CV_KEYCLOAK_URL` is set (federation), both are set to it. **`Keycloak.Client`** comes from `KC_CLIENT` (default `test_client`).
 - **Vault AppRole credentials** are not in this file. They come from the `VAULT_ROLE_ID`/`VAULT_SECRET_ID` environment variables.
 - **Redis** is required.
 - **External infra:** replace the `cv3-*` hostnames with your endpoints.
