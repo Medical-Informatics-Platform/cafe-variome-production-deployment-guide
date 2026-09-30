@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Render config/*.json from the committed *.template files, substituting
 # __CV_PUBLIC_HOST__ with CV_PUBLIC_HOST from .env. Use this for the production
-# reverse-proxy path (HTTPS + path routing). For an isolated/direct-port staging
-# box use the repo's staging/scripts/fix_cv3_direct_access_config.sh instead.
+# reverse-proxy path (HTTPS + path routing). For an isolated/direct-port dev
+# box use the repo's dev/scripts/fix_cv3_direct_access_config.sh instead.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"

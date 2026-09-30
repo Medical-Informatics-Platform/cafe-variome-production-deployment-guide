@@ -5,7 +5,7 @@ This guide helps to deploy Cafe Variome v3 (CV3) on a hardened Linux server with
 | Path | Contents |
 |---|---|
 | [`production/`](production/) | Production deployment: compose stack, `cv.sh` wrapper, scripts. Runbook: [production/README.md](production/README.md). Security model: [production/SECURITY.md](production/SECURITY.md). |
-| [`staging/`](staging/) | Local developer VM in dev mode. Not hardened; never expose it. See [staging/README.md](staging/README.md). |
+| [`dev/`](dev/) | Local developer VM in dev mode. Not hardened; never expose it. See [dev/README.md](dev/README.md). |
 | `renovate.json`, `.github/workflows/validate.yml` | Image digest updates and CI checks (compose merges, image pins, script syntax). |
 
 ## Prerequisites

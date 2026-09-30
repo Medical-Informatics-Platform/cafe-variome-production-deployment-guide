@@ -118,7 +118,7 @@ jobs:
       - name: bash -n (parse)
         run: |
           fail=0
-          for f in production/cv.sh production/scripts/*.sh staging/scripts/*.sh; do
+          for f in production/cv.sh production/scripts/*.sh dev/scripts/*.sh; do
             bash -n "$f" || { echo "::error file=$f::syntax error"; fail=1; }
           done
           exit $fail

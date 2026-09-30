@@ -5,7 +5,7 @@
 #   2. Keycloak: create the realm + CV3 client (prod redirect/web-origins) + admin user.
 #   3. MongoDB: upsert the admin user.info doc + the user's transit key.
 #
-# Adapted from staging/scripts/bootstrap_cv3_vault.sh + bootstrap_cv3_identity.sh, but for
+# Adapted from dev/scripts/bootstrap_cv3_vault.sh + bootstrap_cv3_identity.sh, but for
 # NON-dev Vault (real root token from init, not "root") and production credentials
 # (KEYCLOAK_ADMIN_PASSWORD, MONGO_ROOT_PASSWORD) + HTTPS reverse-proxy URLs.
 #
