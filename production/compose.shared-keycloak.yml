@@ -1,7 +1,8 @@
 # Shared-Keycloak overlay (cv.sh adds this when CV_KEYCLOAK_URL is set, on top of
 # compose.federation.yml). See FEDERATION.md.
 #
-# Every backend that talks to Keycloak (admin, query, network, db-manager) must reach
+# Every backend that talks to Keycloak (admin, query, network, db-manager, query
+# compiler) must reach
 # the Keycloak of another installation. They go through cv-federation-proxy, so that
 # Keycloak's host must be in allowed_domains.federation.txt. The local cv3-keycloak
 # still runs but is not used by CV3.
@@ -13,7 +14,7 @@ x-keycloak-client: &keycloak_client
     HTTPS_PROXY: http://cv-federation-proxy:3128
     http_proxy: http://cv-federation-proxy:3128
     https_proxy: http://cv-federation-proxy:3128
-    NO_PROXY: &no_proxy localhost,127.0.0.1,::1,cv-proxy,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-vault,cv3-keycloak,cv3-mongo,cv3-redis,${CV_PUBLIC_HOST:?federation needs CV_PUBLIC_HOST}
+    NO_PROXY: &no_proxy localhost,127.0.0.1,::1,cv-proxy,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-query-compiler,cv3-backend-dbm,cv3-backend-scheduler,cv3-vault,cv3-keycloak,cv3-mongo,cv3-redis,${CV_PUBLIC_HOST:?federation needs CV_PUBLIC_HOST}
     no_proxy: *no_proxy
   volumes:
     - ./federation:/opt/cv3-fed:ro
@@ -28,4 +29,6 @@ services:
   cv3-backend-query:
     <<: *keycloak_client
   cv3-backend-database-manager:
+    <<: *keycloak_client
+  cv3-backend-query-compiler:
     <<: *keycloak_client

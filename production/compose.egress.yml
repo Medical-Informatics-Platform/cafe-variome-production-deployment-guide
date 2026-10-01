@@ -15,8 +15,8 @@ x-backend-egress: &backend_egress
     HTTPS_PROXY: http://cv-egress-proxy:3128
     http_proxy: http://cv-egress-proxy:3128
     https_proxy: http://cv-egress-proxy:3128
-    NO_PROXY: localhost,127.0.0.1,::1,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-frontend
-    no_proxy: localhost,127.0.0.1,::1,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-frontend
+    NO_PROXY: localhost,127.0.0.1,::1,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-query-compiler,cv3-backend-dbm,cv3-backend-scheduler,cv3-frontend
+    no_proxy: localhost,127.0.0.1,::1,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-query-compiler,cv3-backend-dbm,cv3-backend-scheduler,cv3-frontend
 
 services:
   cv-egress-proxy:
@@ -86,6 +86,11 @@ services:
       cv-egress-proxy:
         condition: service_healthy
   cv3-backend-database-manager:
+    <<: *backend_egress
+    depends_on:
+      cv-egress-proxy:
+        condition: service_healthy
+  cv3-backend-query-compiler:
     <<: *backend_egress
     depends_on:
       cv-egress-proxy:

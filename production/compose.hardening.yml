@@ -79,6 +79,17 @@ services:
       - "/home/appuser/.cache:size=128m,uid=100,gid=101,mode=0755"
       - "/home/appuser/.local:size=512m,uid=100,gid=101,mode=0755"
 
+  cv3-backend-query-compiler:
+    <<: *harden
+    mem_limit: "1g"
+    cpus: "1.0"
+    tmpfs:
+      - "/tmp:size=256m,uid=100,gid=101,mode=1777"
+      - "/run:size=64m,uid=100,gid=101,mode=0755"
+      - "/app/logs:size=64m,uid=100,gid=101,mode=0755"
+      - "/home/appuser/.cache:size=128m,uid=100,gid=101,mode=0755"
+      - "/home/appuser/.local:size=512m,uid=100,gid=101,mode=0755"
+
   cv3-backend-database-manager:
     <<: *harden
     mem_limit: "1g"

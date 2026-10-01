@@ -2,7 +2,7 @@
 
 By default this deployment is an **isolated installation**. Setting `CV_FEDERATION=1` lets it join discovery networks with other CV3 installations. Isolated installs are unaffected.
 
-> **Status:** the egress path, proxy patch, CA handling, Caddy rule and config rendering have been tested in the pinned images. A full join between two live installations has not been tested yet. The shared-Keycloak requirement below is inferred from the CV3 code; the test procedure checks both setups.
+> **Status:** tested between two live installations (Ubuntu 24.04, pinned images, October 2026). With separate Keycloaks, the join request reaches the peer but is rejected at the token check. With a shared Keycloak, the join, approval and node and user sync work in both directions. With synthetic data, federated meta queries (dataset discovery) and the network index exchange work; record queries return no results because of CV3 bugs (see Known CV3 issues).
 
 ## How CV3 federation works
 
@@ -12,7 +12,7 @@ By default this deployment is an **isolated installation**. Setting `CV_FEDERATI
   1. checks `GET {peer}/federation/`;
   2. sends messages with `POST {peer}/federation/federation/`.
 - Each message is signed with a per-network RSA key stored in Vault, and carries a Keycloak token.
-- The receiver checks the token by calling `introspect` on **its own** Keycloak. So all installations in a network must share one Keycloak realm (*inferred*), each with its own client.
+- The receiver checks the token by calling `introspect` on **its own** Keycloak. So all installations in a network must share one Keycloak realm, each with its own client. With separate Keycloaks the receiver logs `Failed to get client id: 'client_id'` and drops the message.
 - Peers verify TLS certificates.
 
 ## What `CV_FEDERATION=1` adds
@@ -86,9 +86,14 @@ For test hosts with `CV_TLS=internal`:
 
 ## Join a network
 
-Use the admin UI, or the admin API under `/api`.
+- **Request to join:** in the admin UI, open Network → Join a Network, enter a member's base URL (`https://<host>`), click Index, then Join on the network. The API equivalent is `POST /api/networks/join` with `{networkId, baseUrl}`.
+- **Approve:** a server admin on that member approves the request. The admin UI of the pinned CV3 version does not list incoming requests (and its dashboard counter always shows 0), so use the API. Signed in to the admin UI, run this in the browser's developer console, with the admin's bearer token copied from any `/api/` request in the Network tab:
 
-- **Request to join:** a data admin calls `POST /api/networks/join` with `{networkId, baseUrl}`, where `baseUrl` is a member's URL (`https://<host>`). A server admin on that member approves with `POST /api/networks/requests/<id>/approve`.
+  ```js
+  const H = {Authorization: 'Bearer <token>'};
+  await (await fetch('/api/networks/requests?status=pending', {headers: H})).json();   // note messageId and challenge
+  await fetch('/api/networks/requests/<messageId>/approve', {method: 'POST', headers: H}); // expect 204
+  ```
 - **Invite:** a member calls `POST /api/networks/<id>/invite` with `{baseUrl}`. The invited side approves the same way.
 - **Verify the challenge:** every request and invite shows three random words. The code does not check them; compare them with the other admin over a separate channel before approving.
 - **Approve other nodes:** nodes learned from other members appear as pending. A data admin approves each one with `POST /api/nodes/<id>/approve`.
@@ -107,3 +112,10 @@ Use the admin UI, or the admin API under `/api`.
 - **Beacon sources.** Hosts queried by `cv3-backend-query-meta` must also be in `allowed_domains.federation.txt`.
 - **Backups.** Network keys and peer public keys are stored in Vault, so `backup.sh` covers them. Losing them means rejoining every network.
 - **Security trade-offs.** See [SECURITY.md](SECURITY.md) §3 and §7.
+- **Known CV3 issues** (pinned images, not fixable in this repo):
+  - Creating a network that fails half-way (e.g. a Vault error) still stores the network. Delete the duplicate from MongoDB (`network.networks`).
+  - The admin UI shows no incoming join requests, and the dashboard's "Network requests" count is always 0 (it queries `Pending`, but CV3 stores `pending`).
+  - A join request that fails validation still shows as joined on the requesting side.
+  - Record queries (local and federated) finish with no results: the query compiler rebuilds every filter with the library's base classes (`'EavQuery'`/`'SubjectQuery' object has no attribute 'generate_pipeline'`), and a receiving node reads the compiler's answer without waiting for it, so it replies to the peer with a non-JSON body.
+  - Uploading and ingesting files through the admin API does not fill sources in this build.
+  - HPO/ORDO similarity queries call the BTS service (`DiscoverySetting.btsEndpoint`, default `similarity.cafevariome.org`), which this stack neither provides nor allows as egress.

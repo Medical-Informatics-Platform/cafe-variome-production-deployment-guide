@@ -104,36 +104,32 @@ echo "== Vault: CV3 approle / kv-v2 / transit =="
 vt auth enable approle  >/dev/null 2>&1 || true
 vt secrets enable -path=kv kv-v2 >/dev/null 2>&1 || true
 vt secrets enable -path=transit_cv3 transit >/dev/null 2>&1 || true
-docker exec -i -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN="$ROOT_TOKEN" cv3-vault sh -c 'cat > /tmp/cv3-policy.hcl' <<'POL'
-path "kv/data/cv3"        { capabilities = ["create","update","read"] }
-path "kv/metadata/cv3"    { capabilities = ["read","list"] }
-# delete: the db-manager's periodic cleanup removes departed users' transit keys
-# (the app marks keys deletion_allowed at creation); without it the cleanup job
-# fails with hvac Forbidden on every cycle after any user deletion.
-path "transit_cv3/keys/*"    { capabilities = ["create","read","update","list","delete"] }
-path "transit_cv3/sign/*"    { capabilities = ["create","update","read"] }
-path "transit_cv3/verify/*"  { capabilities = ["create","update","read"] }
-path "transit_cv3/encrypt/*" { capabilities = ["create","update","read"] }
-path "transit_cv3/decrypt/*" { capabilities = ["create","update","read"] }
-POL
+# Policy lives in vault/cv3-policy.hcl (also applied to existing installs by
+# scripts/vault_update_policy.sh).
+docker exec -i cv3-vault sh -c 'cat > /tmp/cv3-policy.hcl' < vault/cv3-policy.hcl
 vt policy write cv3-policy /tmp/cv3-policy.hcl >/dev/null
-# Bound the credentials instead of issuing an eternal one. Defaults give a
-# secret_id that survives restarts but not forever, and short-lived tokens that are
-# renewed by the client:
+# Bound the credentials instead of issuing an eternal one:
 #   secret_id_ttl        - how long the .env credential stays usable (default 90d)
-#   token_ttl/max_ttl    - lifetime of the tokens it mints
+#   token_ttl/max_ttl    - lifetime of the tokens it mints (default 90d). CV3 logs in
+#                          once at startup and never renews or re-logs in, so a token
+#                          must outlive the backend process: with 1h tokens every Vault
+#                          call fails with "invalid token" an hour after each start.
+#                          The approle mount's max lease is raised to match (Vault's
+#                          default cap is 32 days).
 #   secret_id_num_uses=0 - unlimited logins within the TTL (each backend logs in, and
 #                          they restart independently, so a use-count would break them)
 # Rotate before expiry with:
 #   docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=<token> cv3-vault \
 #     vault write -f auth/approle/role/cv3/secret-id
 # then write the new secret_id into .env and restart the backends.
+APPROLE_TOKEN_TTL="${VAULT_APPROLE_TOKEN_TTL:-2160h}"
+vt auth tune -max-lease-ttl="$APPROLE_TOKEN_TTL" approle >/dev/null
 vt write auth/approle/role/cv3 \
   token_policies="cv3-policy" \
   secret_id_ttl="${VAULT_APPROLE_SECRET_ID_TTL:-2160h}" \
   secret_id_num_uses=0 \
-  token_ttl="${VAULT_APPROLE_TOKEN_TTL:-1h}" \
-  token_max_ttl="${VAULT_APPROLE_TOKEN_MAX_TTL:-24h}" >/dev/null
+  token_ttl="$APPROLE_TOKEN_TTL" \
+  token_max_ttl="$APPROLE_TOKEN_TTL" >/dev/null
 ROLE_ID="$(vt read -field=role_id auth/approle/role/cv3/role-id)"
 SECRET_ID="$(vt write -field=secret_id -f auth/approle/role/cv3/secret-id)"
 vt kv put kv/cv3 keycloak_client_secret="$KEYCLOAK_CLIENT_SECRET" secret_key="$(openssl rand -hex 32)" >/dev/null

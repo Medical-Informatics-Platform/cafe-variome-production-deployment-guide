@@ -52,7 +52,7 @@ case "$ARCHIVE" in
 esac
 SRC="$TMP/$(ls "$TMP")"
 
-BACKENDS="cv3-backend-admin cv3-backend-query cv3-backend-network cv3-backend-query-meta cv3-backend-dbm cv3-backend-scheduler"
+BACKENDS="cv3-backend-admin cv3-backend-query cv3-backend-network cv3-backend-query-meta cv3-backend-query-compiler cv3-backend-dbm cv3-backend-scheduler"
 
 echo "== Stop writers (backends + Keycloak) so the restore is consistent =="
 docker stop $BACKENDS cv3-keycloak >/dev/null

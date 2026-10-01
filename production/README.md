@@ -10,7 +10,7 @@ Run every command in this directory through `./cv.sh`. It is a wrapper around `d
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | The 7 CV3 app containers. Images are pinned by digest; no host ports are published. |
+| `docker-compose.yml` | The 8 CV3 app containers. Images are pinned by digest; no host ports are published. |
 | `compose.hardening.yml` | Per-container hardening: read-only root filesystem, dropped capabilities, tmpfs, non-root uids. |
 | `compose.local-infra.yml` | Keycloak, Vault, MongoDB and Redis, for local-infra mode. |
 | `compose.egress.yml` | Squid egress proxy, for external-infra mode. |

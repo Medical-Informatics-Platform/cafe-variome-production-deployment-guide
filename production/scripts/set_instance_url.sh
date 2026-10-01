@@ -45,4 +45,4 @@ echo "Instance URL set to $url${name:+, name '$name'}."
 
 # The backends read InstanceConfig at startup.
 ./cv.sh restart cv3-backend-admin cv3-backend-query cv3-backend-network \
-  cv3-backend-query-meta cv3-backend-scheduler
+  cv3-backend-query-meta cv3-backend-query-compiler cv3-backend-scheduler

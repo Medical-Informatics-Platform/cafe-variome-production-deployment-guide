@@ -57,7 +57,7 @@ Three networks are marked `internal: true`. Docker gives them no default route a
   - At the end of the bootstrap, the root token is revoked and removed from the file. `CV_KEEP_VAULT_ROOT_TOKEN=1` keeps it, for debugging only.
 - **AppRole.** Backends authenticate with `VAULT_ROLE_ID`/`VAULT_SECRET_ID`.
   - The policy allows only the CV3 KV path and the transit keys.
-  - The `secret_id` expires after 90 days. Tokens last 1 hour, renewable up to 24 hours.
+  - The `secret_id` expires after 90 days. Tokens also last 90 days (`VAULT_APPROLE_TOKEN_TTL`), because CV3 logs in once at startup and never renews its token (see §7).
   - For rotation, see [README.md](README.md#rotate-credentials).
 - **Keycloak** runs in production mode on its own Postgres, under `/auth`.
   - The service account of the CV3 client has only the `manage-users`, `view-users` and `query-users` roles.
@@ -107,6 +107,7 @@ None of the fixes in the right-hand column are implemented in this repo.
 | All 5 unseal shares are stored in one file, so the 3-of-5 threshold does not separate custodians. | Hand the shares to separate people and use `unseal_vault.sh --stdin`, or use your organisation's managed Vault. |
 | No monitoring or alerting. Metrics and log shipping are disabled in `backend_config.json.template`. | Add external monitoring. |
 | No rate limiting at the proxy and no CSP. Security headers are set, but the SPA's inline and eval usage has not been audited. | No fix proposed yet. |
+| Long-lived Vault tokens. CV3 logs in to Vault once per backend start and never renews or re-logs in, so its AppRole tokens must outlive the process: they last 90 days, like the `secret_id`. A token leaked from a backend's memory stays valid that long. | Rotate the `secret_id` and restart the backends regularly; shorter `VAULT_APPROLE_TOKEN_TTL` values need backend restarts within that time. |
 | With `CV_TLS=internal` the certificate is self-signed. | Use a real domain and Let's Encrypt in production. |
 | Federation relies on `sitecustomize.py`. If a CV3 update stops using aiohttp's `ClientSession`, peer traffic fails closed (no route); it does not bypass the proxy. | After image updates, check `cv3-backend-network` logs and the federation proxy's access log. |
 | Federation with a shared Keycloak: each peer's service account holds `manage-users` in the shared realm, so a compromised peer can change other installations' users. | Only federate with trusted operators. Restrict `CV_KC_ADMIN_PEERS` to their exact IPs. |

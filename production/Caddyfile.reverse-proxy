@@ -59,15 +59,23 @@
 		format json
 	}
 
-	# Backend APIs. handle_path strips the public prefix so the backend sees the
-	# request at root, matching the upstream Apache `ProxyPass /api http://:5000`.
-	handle_path /api/* {
+	# Backend APIs. The public prefix is stripped so the backend sees the request at
+	# root, matching the upstream Apache `ProxyPass /api http://:5000`. The bare path
+	# (/api, no slash) must match too: CV3's network backend checks "{url}/api" to
+	# decide whether its own installation is reachable.
+	@api path /api /api/*
+	handle @api {
+		uri strip_prefix /api
 		reverse_proxy cv3-backend-admin:5000
 	}
-	handle_path /query/* {
+	@query path /query /query/*
+	handle @query {
+		uri strip_prefix /query
 		reverse_proxy cv3-backend-query:5100
 	}
-	handle_path /federation/* {
+	@federation path /federation /federation/*
+	handle @federation {
+		uri strip_prefix /federation
 		reverse_proxy cv3-backend-network:5200
 	}
 

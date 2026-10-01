@@ -127,6 +127,23 @@ services:
     healthcheck: { disable: true }      # worker (no HTTP server) - drop the image's curl :5000 check
     logging: *cv_logging
 
+  # Runs record queries: consumes the Redis "record_query" queue that the query and
+  # network backends fill, for local and federated queries. Without it, record
+  # queries never return. HPO/ORDO similarity calls the BTS (DiscoverySetting
+  # btsEndpoint), which this stack does not provide; EAV queries do not need it.
+  cv3-backend-query-compiler:
+    image: brookeslab/cv3-backend-query-compiler:latest@sha256:2fa3aee196fa6da35e00414b5b5de5cd2f63504ec5af4fad8d35043bae2bf6b0
+    container_name: cv3-backend-query-compiler
+    restart: unless-stopped
+    depends_on: [cv3-backend-database-manager]
+    environment:
+      <<: *backend_env
+      QUERY_WORKER: ${QUERY_WORKER:-2}
+    volumes: *backend_volumes
+    networks: [cv_backend, cv_egress]
+    healthcheck: { disable: true }      # the image's check reads ./instance_config.json, which is mounted elsewhere
+    logging: *cv_logging
+
   cv3-backend-database-manager:
     image: brookeslab/cv3-backend-database-manager:latest@sha256:77c234b9fb6c3544bddd45caf7036a7963536d884a9e737079efed21f2d1141d
     container_name: cv3-backend-dbm

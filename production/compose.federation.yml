@@ -15,7 +15,7 @@ x-federation-client: &federation_client
     http_proxy: http://cv-federation-proxy:3128
     https_proxy: http://cv-federation-proxy:3128
     # In-stack names and our own public host (reached via cv-proxy's alias) stay direct.
-    NO_PROXY: &no_proxy localhost,127.0.0.1,::1,cv-proxy,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-dbm,cv3-backend-scheduler,cv3-vault,cv3-keycloak,cv3-mongo,cv3-redis,${CV_PUBLIC_HOST:?federation needs CV_PUBLIC_HOST}
+    NO_PROXY: &no_proxy localhost,127.0.0.1,::1,cv-proxy,cv3-frontend,cv3-backend-admin,cv3-backend-query,cv3-backend-network,cv3-backend-query-meta,cv3-backend-query-compiler,cv3-backend-dbm,cv3-backend-scheduler,cv3-vault,cv3-keycloak,cv3-mongo,cv3-redis,${CV_PUBLIC_HOST:?federation needs CV_PUBLIC_HOST}
     no_proxy: *no_proxy
   volumes:
     - ./federation:/opt/cv3-fed:ro
